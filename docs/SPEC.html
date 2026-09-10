@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>营销自动化 Agent 项目技术方案与实施计划</title>
+</head>
+<body>
+
+<h1>营销自动化 Agent（B 端）项目技术方案与实施计划</h1>
+
+<table>
+<tr><th>项</th><th>内容</th></tr>
+<tr><td>文档名称</td><td>营销自动化 Agent 项目技术方案与实施计划</td></tr>
+<tr><td>版本</td><td>v1.0</td></tr>
+<tr><td>日期</td><td>2026-09-10</td></tr>
+<tr><td>状态</td><td>评审稿</td></tr>
+<tr><td>关联文档</td><td>《营销自动化 Agent 产品需求说明（PRD）》</td></tr>
+</table>
+
+<h2>1. 项目目标</h2>
+<p>在不改动 ZT-agent（C 端客服）核心代码的前提下，独立构建一个 B 端营销自动化 Agent：以 React 运营后台为界面、FastAPI 为后端、LangChain 编排 LLM 工作流，复用 ZT-agent 沉淀的 MySQL 数据与模型/向量基础设施，实现「销售分析 → 文案生成 → 客户分群 → 活动编排 → 合规审核」的自动化营销闭环。</p>
+
+<h2>2. 技术选型与理由</h2>
+<table>
+<tr><th>技术</th><th>用途</th><th>选型理由</th></tr>
+<tr><td>React</td><td>运营控制台前端</td><td>组件化、生态成熟，独立于 ZT-agent 的 Vue3，展示多栈能力</td></tr>
+<tr><td>FastAPI</td><td>B 端后端服务</td><td>异步、类型提示、自动 OpenAPI，适合 AI 工具/流式接口</td></tr>
+<tr><td>LangChain</td><td>Agent 编排与工具链</td><td>LCEL 把多步营销工作流工程化；复用 Tool/Chain/Memory 抽象</td></tr>
+<tr><td>DeepSeek (deepseek-chat)</td><td>对话/生成大模型</td><td>与 ZT-agent 共用同一 OpenAI 兼容接口与 API Key，降低成本与切换成本</td></tr>
+<tr><td>bge-m3 + Chroma</td><td>Embedding 与向量库</td><td>复用 ZT-agent 的语义检索能力做文案去重/合规/相似商品</td></tr>
+<tr><td>MySQL (agent_db)</td><td>共享数据底座</td><td>直接只读复用 ZT-agent 已有业务表，零 ETL</td></tr>
+<tr><td>Docker + nginx</td><td>编排与反代</td><td>与 ZT-agent 同 compose 编排，nginx 统一路由 /api/cs 与 /api/mkt</td></tr>
+</table>
+
+<h2>3. 系统架构</h2>
+<h3>3.1 服务拓扑</h3>
+<ul>
+<li><strong>db：</strong>MySQL 8.0，agent_db（两后端共用，营销侧只读）。</li>
+<li><strong>web：</strong>Django ZT-agent（C 端，已有）。</li>
+<li><strong>mkt：</strong>FastAPI 营销 Agent（B 端，新增）。</li>
+<li><strong>chroma：</strong>向量服务（共用 collection）。</li>
+<li><strong>nginx：</strong>反代，/api/cs→web，/api/mkt→mkt，/→React 静态。</li>
+</ul>
+<h3>3.2 数据流</h3>
+<p>[顾客] → [ZT-agent] 写 conversations +（命中规则）写 customer_signals → [FastAPI 营销 Agent] 定时扫 signals，读 orders/products 分析、读 knowledge_chunks+Chroma 生成文案 → 写 marketing_campaigns → [React 后台] 审核后执行。</p>
+<h3>3.3 与 ZT-agent 的关联</h3>
+<p>关联发生在<strong>数据/基础设施层</strong>（共享 agent_db、Chroma、.env 密钥、JWT 签名密钥），<strong>代码层零耦合</strong>：两个服务进程级隔离，可独立部署、独立 git 历史。</p>
+
+<h2>4. 关键技术方案</h2>
+<ul>
+<li><strong>复用 RAG/向量库：</strong>Chroma 以 server 模式暴露，两端共用 collection；营销侧用于相似商品推荐与文案合规校验。</li>
+<li><strong>LangChain Agent + Tools：</strong>定义 3 个工具——query_sales（读 orders 聚合）、read_knowledge（读知识库）、generate_copy（生成文案）；用 AgentExecutor 串联多步推理。</li>
+<li><strong>JWT 共用：</strong>FastAPI 用与 Django simplejwt 相同的 SIGNING_KEY 校验令牌，React 登录一次双端通用。</li>
+<li><strong>事件表解耦：</strong>customer_signals 作为两 Agent 协同契约，支持重放与审计，避免硬编码互调。</li>
+</ul>
+
+<h2>5. 实施路线</h2>
+<table>
+<tr><th>阶段</th><th>目标</th><th>关键产出</th><th>验收</th></tr>
+<tr><td>P0 基础设施</td><td>根 docker-compose + 共享 .env，把 db 上提到根</td><td>compose 编排 db/web/mkt/chroma/nginx</td><td>两服务同连 agent_db</td></tr>
+<tr><td>P1 数据只读接入</td><td>FastAPI 用 SQLAlchemy 只读 agent_db</td><td>销量榜 / 库存预警接口</td><td>真实数据一致</td></tr>
+<tr><td>P2 Agent 内核</td><td>LangChain Agent + 3 工具</td><td>端到端生成一份营销文案</td><td>能跑通工具循环</td></tr>
+<tr><td>P3 运营后台</td><td>React 看板 + 文案草稿 + 审核队列</td><td>可演示前端</td><td>闭环可用</td></tr>
+<tr><td>P4 协同与事件</td><td>customer_signals 联动 + 合规审核</td><td>信号触发方案草稿</td><td>协同闭环</td></tr>
+<tr><td>P5 打磨</td><td>流式输出、错误处理、文档与演示</td><td>就绪可演示/面试</td><td>完整可讲</td></tr>
+</table>
+
+<h2>6. 目录结构与部署（布局 A：兄弟项目）</h2>
+<pre>
+中渔天下/
+├── ZT-agent/                # 现有 C 端客服（独立 git 仓库，不动）
+├── marketing-agent/         # 新增 B 端营销（独立 git 仓库）
+│   ├── backend/             # FastAPI + LangChain
+│   ├── frontend/            # React 运营控制台
+│   └── docs/                # 本文档与 PRD
+├── docker-compose.yml       # 根：db + web + mkt + chroma + nginx
+└── .env                     # 共享：DB 凭据 / DEEPSEEK_API_KEY / JWT_SIGNING_KEY
+</pre>
+<p>部署：根目录 <code>docker compose up</code> 一键起全部服务；两个仓库各自独立提交与回滚。</p>
+
+<h2>7. 风险与应对</h2>
+<table>
+<tr><th>风险</th><th>应对</th></tr>
+<tr><td>双栈复杂度（两套后端/依赖）</td><td>进程级隔离、独立 repo；面试讲清「为何分开」</td></tr>
+<tr><td>数据一致性</td><td>FastAPI 默认只读业务表，写只走新增表</td></tr>
+<tr><td>过度承诺自动化</td><td>定位「AI 辅助 + 人工审核」，MVP 不实接外部渠道</td></tr>
+<tr><td>密钥泄露</td><td>全部走 .env，不入库；.env.example 仅留占位</td></tr>
+</table>
+
+<h2>8. 面试叙事点</h2>
+<ul>
+<li><strong>双栈能力：</strong>「ZT-agent 自研 ReAct 验证原理，营销 Agent 用 LangChain 验证工程化，既懂底层也会用框架。」</li>
+<li><strong>架构思维：</strong>「两个 Agent 进程级解耦、共享数据底座，用事件表协同——这是刻意的微服务设计。」</li>
+<li><strong>业务理解：</strong>「把客服沉淀的咨询/交易数据转化为营销动作，体现从数据到业务价值的闭环思维。」</li>
+</ul>
+
+</body>
+</html>

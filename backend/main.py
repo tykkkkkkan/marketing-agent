@@ -1,0 +1,61 @@
+"""
+营销自动化 Agent —— 后端入口（FastAPI）
+─────────────────────────────────────────
+设计原则（与 ZT-agent 解耦）：
+  · 只读连接 ZT-agent 的 agent_db，业务表一行不写（db.py 内置只读守卫）；
+  · 自身新增表（marketing_drafts）才允许写入；
+  · 大模型能力由 LangChain 接入（marketing_agent.py）。
+"""
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from routers import analytics, marketing
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动钩子：创建自管表（幂等，只建本服务的表，不触碰业务表）"""
+    try:
+        from drafts import init_own_tables
+
+        init_own_tables()
+        print("[startup] 自管表 marketing_drafts 就绪")
+    except Exception as e:  # 数据库暂不可用时不阻塞服务启动
+        print(f"[warn] 自管表初始化跳过：{type(e).__name__}: {e}")
+    yield
+
+
+app = FastAPI(
+    title="中渔小助 · 营销自动化 Agent",
+    version="0.3.0",
+    description=(
+        "面向 B 端的营销自动化服务：只读消费 ZT-agent 的业务数据，"
+        "由 LangChain 编排生成营销文案，经人工审核后发布。"
+    ),
+    lifespan=lifespan,
+)
+
+# CORS：允许 React 前端（Vite 开发 5173 / 预览 4173）跨域调用
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(analytics.router)
+app.include_router(marketing.router)
+
+
+@app.get("/api/health", tags=["系统"])
+def health():
+    """健康检查"""
+    return {"success": True, "service": "marketing-agent", "status": "ok"}

@@ -1,0 +1,37 @@
+# 营销自动化 Agent —— 容器编排（布局 A：与 ZT-agent 独立部署、各自独立 git）
+#
+# 数据关联方式（关键）：
+#   通过宿主机 MySQL（即 ZT-agent 正在使用的同一个 agent_db）**只读**连接，
+#   因此两个 Agent 无需同仓库、无需互相 import，靠「同一份数据」自然联动。
+#
+# 启动：在本目录放一份 .env（含 DB_PASSWORD / DEEPSEEK_API_KEY），然后
+#   docker compose up -d --build
+# 访问：http://localhost:8080 （前端） / http://localhost:8010/docs （API 文档）
+
+services:
+  mkt:
+    build: ./backend
+    container_name: marketing-agent-api
+    environment:
+      DB_HOST: host.docker.internal      # 指向宿主机上 ZT-agent 的 MySQL
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_NAME: agent_db
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: https://api.deepseek.com/v1
+      DEEPSEEK_MODEL: deepseek-chat
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    container_name: marketing-agent-web
+    depends_on:
+      - mkt
+    ports:
+      - "8080:80"
+    restart: unless-stopped

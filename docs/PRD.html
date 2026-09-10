@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>营销自动化 Agent 产品需求说明</title>
+</head>
+<body>
+
+<h1>营销自动化 Agent（B 端）产品需求说明（PRD）</h1>
+
+<table>
+<tr><th>项</th><th>内容</th></tr>
+<tr><td>文档名称</td><td>营销自动化 Agent（B 端）产品需求说明</td></tr>
+<tr><td>版本</td><td>v1.0</td></tr>
+<tr><td>日期</td><td>2026-09-10</td></tr>
+<tr><td>状态</td><td>评审稿</td></tr>
+<tr><td>作者</td><td>项目规划（配合 ZT-agent 团队）</td></tr>
+<tr><td>关联系统</td><td>ZT-agent（C 端 AI 客服 Agent）</td></tr>
+</table>
+
+<h2>1. 产品背景与目标</h2>
+
+<h3>1.1 业务背景</h3>
+<p>中渔天下是一家渔具企业，已上线 ZT-agent（C 端 AI 客服 Agent），覆盖顾客咨询、订单/库存/钱包查询与引导转化，沉淀了大量真实咨询与交易数据。当前企业侧（B 端）的运营工作——销售复盘、活动文案、选品与触达决策——仍依赖人工完成，缺少以数据驱动的自动化营销能力。</p>
+
+<h3>1.2 产品目标</h3>
+<p>构建独立的<strong>营销自动化 Agent（B 端）</strong>，面向运营与商家，用大语言模型（LLM）辅助完成：销售分析、营销文案生成、客户分群、活动编排与合规审核，把 ZT-agent 沉淀的顾客咨询与交易数据转化为可执行的营销动作，实现「数据 → 洞察 → 动作」的闭环。</p>
+
+<h3>1.3 成功指标（KPI）</h3>
+<ul>
+<li>运营制作一份营销方案/文案的平均耗时从人工约 30 分钟降至约 3 分钟；</li>
+<li>能够基于真实交易数据自动产出「销量榜 / 库存预警 / 退款分析」等看板；</li>
+<li>顾客高意向信号（来自 ZT-agent）可在运营后台被自动归集与提醒；</li>
+<li>营销动作 100% 经过人工审核后执行，杜绝误触达。</li>
+</ul>
+
+<h2>2. 用户角色与使用场景</h2>
+<table>
+<tr><th>角色</th><th>职责</th><th>典型场景</th></tr>
+<tr><td>运营专员</td><td>看数据、生成文案、编排活动、提交审核</td><td>周一复盘上周销量，生成「春季钓法主推」朋友圈/私域文案</td></tr>
+<tr><td>商家 / 店主</td><td>查看分群与活动效果，决策是否投放</td><td>查看「高频咨询未下单」人群，决定是否发放优惠券</td></tr>
+<tr><td>系统管理员</td><td>配置模型密钥、维护知识库、审计日志</td><td>配置 DeepSeek / 向量库连接，查看操作日志与权限</td></tr>
+</table>
+
+<h2>3. 功能需求</h2>
+
+<h3>F1 销售分析看板</h3>
+<ul>
+<li><strong>描述：</strong>基于 agent_db 的 orders / wallet_transactions / products / inventory 只读聚合，展示经营概览。</li>
+<li><strong>输入：</strong>时间范围、品类筛选。</li>
+<li><strong>输出：</strong>销量榜、GMV、复购率、退款率、库存预警列表。</li>
+<li><strong>验收标准：</strong>数据来源于真实库表，与后台订单数据一致；响应时间 &lt; 2s。</li>
+</ul>
+
+<h3>F2 智能营销文案生成</h3>
+<ul>
+<li><strong>描述：</strong>结合销售洞察与企业知识库，生成面向不同渠道（朋友圈/私域/详情页）的营销文案。</li>
+<li><strong>输入：</strong>目标商品 / 人群 / 渠道 / 卖点关键词。</li>
+<li><strong>输出：</strong>多版本文案草稿 + 合规性自检标记。</li>
+<li><strong>验收标准：</strong>文案不出现虚假数据与违禁词；支持一键重写与微调。</li>
+</ul>
+
+<h3>F3 客户分群与画像</h3>
+<ul>
+<li><strong>描述：</strong>由 orders + conversations 聚合出客户画像与分群（高价值 / 流失风险 / 高频咨询未下单）。</li>
+<li><strong>输入：</strong>分群规则（RFM 或规则表达式）。</li>
+<li><strong>输出：</strong>分群列表、人群规模、特征标签。</li>
+<li><strong>验收标准：</strong>分群可解释，规则可配置，结果可导出。</li>
+</ul>
+
+<h3>F4 营销活动编排（自动化触达）</h3>
+<ul>
+<li><strong>描述：</strong>基于信号与分群，生成活动方案（目标人群、文案、节奏）。MVP 阶段仅产出草稿并提交审核，不自动外发。</li>
+<li><strong>输入：</strong>触发条件（如库存预警、高意向信号）。</li>
+<li><strong>输出：</strong>活动方案草稿（marketing_campaigns）。</li>
+<li><strong>验收标准：</strong>活动方案经人工审核后才可标记为「可执行」。</li>
+</ul>
+
+<h3>F5 客户信号看板</h3>
+<ul>
+<li><strong>描述：</strong>消费 ZT-agent 写入的 customer_signals 事件表，归集顾客高意向 / 流失风险 / 高频问题。</li>
+<li><strong>输入：</strong>信号类型、时间。</li>
+<li><strong>输出：</strong>信号列表与趋势。</li>
+<li><strong>验收标准：</strong>信号与 ZT-agent 写入事件一一对应，可下钻到原对话。</li>
+</ul>
+
+<h3>F6 合规审核队列</h3>
+<ul>
+<li><strong>描述：</strong>所有对外文案与活动在执行前进入审核队列，由运营/管理员确认。</li>
+<li><strong>输入：</strong>待审文案 / 活动。</li>
+<li><strong>输出：</strong>审核通过 / 驳回（附理由）。</li>
+<li><strong>验收标准：</strong>未审核内容不可进入执行态。</li>
+</ul>
+
+<h2>4. 与 ZT-agent 的协同</h2>
+<ul>
+<li><strong>数据关联：</strong>两后端共用 MySQL 库 agent_db；营销 Agent 对业务表只读，仅写新增的 customer_signals / marketing_campaigns 等表，杜绝与订单/库存事务冲突。</li>
+<li><strong>事件信号：</strong>ZT-agent 在对话中识别「高购买意向 / 高频问题 / 流失风险」时写入 customer_signals；营销 Agent 定时消费并触发动作，事件表比「直接 API 互调」更稳（可重放、可审计、解耦部署）。</li>
+<li><strong>边界：</strong>ZT-agent 不调用营销 Agent；营销 Agent 不修改订单/库存/钱包，仅读取分析。</li>
+</ul>
+
+<h2>5. 非功能性需求</h2>
+<table>
+<tr><th>维度</th><th>要求</th></tr>
+<tr><td>性能</td><td>看板查询 &lt; 2s；文案生成流式返回，首字 &lt; 1.5s</td></tr>
+<tr><td>安全</td><td>运营后台 JWT 鉴权；密钥走 .env 不入库；对外仅只读 agent_db</td></tr>
+<tr><td>可用性</td><td>单服务故障不影响 ZT-agent；营销 Agent 可独立部署/回滚</td></tr>
+<tr><td>合规</td><td>所有对外内容经人工审核；不生成虚假数据与违禁表述</td></tr>
+<tr><td>可观测</td><td>关键操作留痕（谁、何时、何动作）；LLM 调用可追踪</td></tr>
+</table>
+
+<h2>6. 范围与边界（MVP）</h2>
+<p><strong>范围内（MVP）：</strong>F1 销售看板、F2 文案生成、F5 信号看板、F6 合规审核、只读接入 agent_db、React 运营后台基础版。</p>
+<p><strong>范围外（后续迭代）：</strong>实接短信/企微/邮件等外部推送渠道；自动 A/B 实验；跨店多租户；实时流式信号消费。</p>
+
+<h2>7. 验收标准与里程碑</h2>
+<table>
+<tr><th>里程碑</th><th>目标</th><th>验收</th></tr>
+<tr><td>M1 数据通路</td><td>FastAPI 只读连上 agent_db，跑通销量榜/库存预警</td><td>真实数据一致</td></tr>
+<tr><td>M2 Agent 内核</td><td>LangChain Agent + 3 工具（查销量/读知识库/生成文案）</td><td>能端到端生成一份文案</td></tr>
+<tr><td>M3 运营后台</td><td>React 看板 + 文案草稿 + 审核队列</td><td>可演示完整闭环</td></tr>
+<tr><td>M4 协同闭环</td><td>customer_signals 联动 + 合规审核</td><td>信号可触发方案草稿</td></tr>
+</table>
+
+</body>
+</html>

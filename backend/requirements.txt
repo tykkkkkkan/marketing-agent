@@ -1,0 +1,20 @@
+# 营销自动化 Agent · 后端依赖
+# Python 3.12+（langchain 1.x 要求）
+# 安装（务必用无中文路径的 venv，中文路径下 uv/pip 会卡死）：
+#   uv venv --python 3.12 "D:/TYKKKKKK/.venvs/marketing-agent"
+#   uv pip install --python "D:/TYKKKKKK/.venvs/marketing-agent/Scripts/python.exe" \
+#     --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# ── Web 框架 ──
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+python-dotenv==1.2.3
+
+# ── 数据库（只读连 ZT-agent 的 agent_db）──
+SQLAlchemy==2.0.52
+PyMySQL==1.2.0
+
+# ── LangChain 大模型编排（1.x 新 API：langchain.agents.create_agent）──
+langchain==1.4.0
+langchain-openai==1.6.2
