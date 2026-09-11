@@ -7,13 +7,17 @@ AI 只是提效工具，最终对外内容必须过人这一关。
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db import get_write_session
-from drafts import MarketingDraft
+from db import get_write_session, ReadSession
+from drafts import MarketingDraft, _draft_dict
+from models_readonly import Conversations, Inventory, KnowledgeChunk, Orders, Products
 
 router = APIRouter(prefix="/api/marketing", tags=["营销自动化"])
 
@@ -34,19 +38,88 @@ class ReviewRequest(BaseModel):
     review_note: str = Field("", max_length=200, description="审核意见")
 
 
-def _draft_dict(d: MarketingDraft) -> dict:
-    return {
-        "id": d.id,
-        "title": d.title,
-        "channel": d.channel,
-        "tone": d.tone,
-        "brief": d.brief,
-        "content": d.content,
-        "status": d.status,
-        "reviewer": d.reviewer,
-        "review_note": d.review_note,
-        "created_at": d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else "",
-    }
+def build_evidence(brief: str) -> dict:
+    """汇总生成文案时引用的真实业务数据（结构化，供前端展示「数据依据」）。
+
+    只做只读查询，不触发大模型；保证依据真实、确定、可复核。
+    """
+    since = datetime.now() - timedelta(days=90)
+    ev = {"sales_ranking": [], "low_stock": [], "hot_questions": [], "knowledge": [], "summary": ""}
+
+    try:
+        with ReadSession() as db:
+            # 近 90 天销量 Top5
+            srows = db.execute(
+                select(
+                    Orders.product_name,
+                    func.coalesce(func.sum(Orders.quantity), 0).label("qty"),
+                    func.coalesce(func.sum(Orders.total_price), 0).label("rev"),
+                )
+                .where(Orders.status != "已取消", Orders.created_at >= since)
+                .group_by(Orders.product_name)
+                .order_by(func.coalesce(func.sum(Orders.quantity), 0).desc())
+                .limit(5)
+            ).all()
+            ev["sales_ranking"] = [
+                {"product_name": r.product_name or "未知商品", "sold_qty": int(r.qty), "revenue": float(r.rev)}
+                for r in srows
+            ]
+
+            # 库存预警 Top10
+            lrows = db.execute(
+                select(Products.name, Inventory.stock, Inventory.reserved_stock, Inventory.alert_line)
+                .join(Inventory, Inventory.product_id == Products.id)
+                .where(
+                    (Inventory.stock - Inventory.reserved_stock) <= Inventory.alert_line,
+                    Products.is_active.is_(True),
+                )
+                .order_by((Inventory.stock - Inventory.reserved_stock).asc())
+                .limit(10)
+            ).all()
+            ev["low_stock"] = [
+                {
+                    "product_name": r.name,
+                    "available_stock": max(0, (r.stock or 0) - (r.reserved_stock or 0)),
+                    "alert_line": r.alert_line or 0,
+                }
+                for r in lrows
+            ]
+
+            # 客户近期咨询 Top8
+            hrows = db.execute(
+                select(Conversations.content)
+                .where(Conversations.role == "user")
+                .order_by(Conversations.created_at.desc())
+                .limit(8)
+            ).all()
+            ev["hot_questions"] = [(r.content or "")[:60] for r in hrows if (r.content or "").strip()]
+
+            # 按需求关键词检索知识库（取前 2 条标题）
+            like = f"%{brief[:10]}%"
+            krows = db.execute(
+                select(KnowledgeChunk.title)
+                .where(KnowledgeChunk.is_active.is_(True))
+                .where(
+                    (KnowledgeChunk.title.like(like))
+                    | (KnowledgeChunk.keywords.like(like))
+                    | (KnowledgeChunk.content.like(like))
+                )
+                .limit(2)
+            ).all()
+            ev["knowledge"] = [r.title for r in krows]
+    except Exception:
+        # 证据缺失不影响文案生成，仅返回空依据
+        return ev
+
+    # 生成一句话摘要
+    top = ev["sales_ranking"][0]["product_name"] if ev["sales_ranking"] else "暂无"
+    top_qty = ev["sales_ranking"][0]["sold_qty"] if ev["sales_ranking"] else 0
+    ev["summary"] = (
+        f"近90天销冠：{top}（{top_qty}件）；库存预警 {len(ev['low_stock'])} 项；"
+        f"参考客户咨询 {len(ev['hot_questions'])} 条"
+        + (f"；命中知识库：{ev['knowledge'][0]}" if ev["knowledge"] else "")
+    )
+    return ev
 
 
 @router.get("/llm-status", summary="大模型配置状态")
@@ -83,12 +156,16 @@ def generate(req: GenerateRequest, db: Session = Depends(get_write_session)):
             detail="文案生成失败，请检查 DEEPSEEK_API_KEY 与网络连通性",
         )
 
+    # 汇总本次生成引用的真实业务数据（结构化依据，供审核人复核）
+    evidence = build_evidence(req.brief)
+
     draft = MarketingDraft(
         title=req.title or f"{req.channel}文案 · {req.brief[:20]}",
         channel=req.channel,
         tone=req.tone,
         brief=req.brief,
         content=content,
+        evidence=json.dumps(evidence, ensure_ascii=False),
         status="待审核",
     )
     db.add(draft)

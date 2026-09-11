@@ -13,6 +13,7 @@ export const api = {
 
   // ── 经营分析（只读 ZT-agent 数据）──
   overview: () => unwrap(http.get('/analytics/overview')),
+  diagnosis: () => unwrap(http.get('/analytics/diagnosis')),
   salesTop: (limit = 5, days = 90) =>
     unwrap(http.get('/analytics/sales-top', { params: { limit, days } })),
   lowStock: (limit = 10) => unwrap(http.get('/analytics/low-stock', { params: { limit } })),
