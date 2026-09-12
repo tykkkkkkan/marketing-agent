@@ -967,3 +967,35 @@ textarea:focus {
   margin: 0;
   accent-color: #1f6b54;
 }
+
+/* ── 自动运营记录：每轮任务业务明细 ── */
+.run-detail-cell {
+  background: rgba(31, 107, 84, 0.04);
+  padding: 8px 12px;
+}
+.run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.run-detail-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.run-detail-item b {
+  min-width: 110px;
+}
+
+/* ── 操作记录：说明列可读性 ── */
+.detail-col {
+  width: 55%;
+}
+.detail-cell {
+  color: var(--muted, #555);
+  word-break: break-all;
+  line-height: 1.6;
+}

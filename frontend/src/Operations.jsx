@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api } from './api'
 
 /* 状态 → 视觉 */
@@ -578,26 +578,35 @@ function AuditPanel() {
     policy_changed: '修改策略',
     updated: '补充参数',
   }
+  const ACTION_ICON = {
+    restock: '📦', ship: '🚚', return: '↩️', cancel: '🚫',
+    autopilot: '🤖', policy: '⚙️', coord: '🤝',
+  }
   return (
     <div className="panel">
-      <h3>操作记录（谁、什么时候、做了什么）</h3>
-      <p className="panel-sub">AI 自动执行与人工作业都会留痕，可随时追溯。</p>
+      <h3>操作记录（谁、什么时候、动了哪笔货/哪张单）</h3>
+      <p className="panel-sub">
+        AI 自动执行与人工作业都会留痕：说明里带商品、订单、客户、数量、金额与运单号，可逐笔追溯。
+      </p>
       <table>
         <thead>
           <tr>
             <th>时间</th>
             <th>动作</th>
             <th>操作人</th>
-            <th>说明</th>
+            <th className="detail-col">说明</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((a) => (
             <tr key={a.id}>
               <td className="nowrap">{a.created_at}</td>
-              <td>{EVENT_LABEL[a.event] || a.event}{a.task_id ? ` #${a.task_id}` : ''}</td>
-              <td>{a.actor}</td>
-              <td className="muted">{a.detail}</td>
+              <td className="nowrap">
+                {ACTION_ICON[a.action_code] || '•'} {EVENT_LABEL[a.event] || a.event}
+                {a.task_id ? ` #${a.task_id}` : ''}
+              </td>
+              <td className="nowrap">{a.actor}</td>
+              <td className="detail-cell">{a.detail}</td>
             </tr>
           ))}
         </tbody>
@@ -649,17 +658,44 @@ function AutoPanel({ auto, onRunNow, busy }) {
         </thead>
         <tbody>
           {runs.map((r) => (
-            <tr key={r.id}>
-              <td className="nowrap">{r.started_at}</td>
-              <td>{TRIGGER_LABEL[r.trigger] || r.trigger}</td>
-              <td className="muted">
-                缺货 {r.scanned?.restock_candidates ?? 0} · 待发货 {r.scanned?.ship_candidates ?? 0} ·
-                售后线索 {r.scanned?.after_sale_hints ?? 0}
-              </td>
-              <td>{r.created_count}</td>
-              <td>{r.auto_count > 0 ? <span className="pill ok">{r.auto_count}</span> : 0}</td>
-              <td>{r.pending_count}</td>
-            </tr>
+            <Fragment key={r.id}>
+              <tr>
+                <td className="nowrap">{r.started_at}</td>
+                <td>{TRIGGER_LABEL[r.trigger] || r.trigger}</td>
+                <td className="muted">
+                  缺货 {r.scanned?.restock_candidates ?? 0} · 待发货 {r.scanned?.ship_candidates ?? 0} ·
+                  售后线索 {r.scanned?.after_sale_hints ?? 0}
+                </td>
+                <td>{r.created_count}</td>
+                <td>{r.auto_count > 0 ? <span className="pill ok">{r.auto_count}</span> : 0}</td>
+                <td>{r.pending_count}</td>
+              </tr>
+              {(r.exec_detail || []).length > 0 && (
+                <tr>
+                  <td colSpan={6} className="run-detail-cell">
+                    <div className="run-detail">
+                      <span className="muted small">本轮任务明细：</span>
+                      {r.exec_detail.map((d) => (
+                        <div key={d.task_id} className="run-detail-item">
+                          <span className="nowrap muted">{d.time || `#${d.task_id}`}</span>
+                          <b>{d.icon} {d.action}</b>
+                          <span>
+                            {d.product}
+                            {d.customer ? ` · 客户 ${d.customer}` : ''}
+                            {d.qty > 0 ? ` · ${d.qty} 件` : ''}
+                            {d.amount > 0 ? ` · ¥${Number(d.amount).toFixed(2)}` : ''}
+                          </span>
+                          <span className={d.status === '已执行' ? 'pill ok' : 'pill'}>
+                            {d.auto ? '🤖 自动' : '👤 待人工'} · {d.status}
+                          </span>
+                          {d.result && <span className="muted small">{d.result}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </table>

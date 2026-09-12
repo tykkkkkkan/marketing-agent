@@ -155,6 +155,7 @@ class AutopilotRun(OwnBase):
     pending_count = Column(Integer, default=0)        # 转人工数
     hints_count = Column(Integer, default=0)          # 售后线索数
     coord_summary = Column(Text, default="")           # L5 跨 Agent 协调巡检摘要（JSON）
+    exec_detail = Column(Text, nullable=True)          # 本轮涉及任务的业务明细（JSON：商品/客户/数量/金额/结果）
     started_at = Column(DateTime, default=datetime.now)
     finished_at = Column(DateTime, nullable=True)
 
@@ -471,6 +472,38 @@ def _audit(db, task_id: int, action_code: str, event: str, actor: str, detail: s
                        actor=actor or "system", detail=(detail or "")[:500]))
 
 
+def _biz_ctx(spec: "ActionSpec", payload: dict, quantity: int = 0, amount: float = 0.0) -> str:
+    """把任务的业务上下文拼成一句人话（商品/订单/客户/数量/金额），用于审计留痕。
+
+    上下文字段（product_name/customer_name/phone/quantity/total_price）由巡检建单时
+    写进 payload，人工建单没有这些字段时自动回落到 ID/数量/金额，保证不空泛。
+    """
+    parts: list[str] = []
+    if payload.get("product_name"):
+        parts.append(f"商品「{payload['product_name']}」")
+    elif spec.target_type == "product" and payload.get("product_id"):
+        parts.append(f"商品#{payload['product_id']}")
+    if payload.get("order_no"):
+        who = payload.get("customer_name") or "客户"
+        if payload.get("phone"):
+            who += f" {payload['phone']}"
+        parts.append(f"订单 {payload['order_no']}（{who}）")
+    try:
+        qty = int(payload.get("quantity") or quantity or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if qty:
+        parts.append(f"{qty} 件")
+    amt = payload.get("total_price") or amount
+    try:
+        amt_f = float(amt or 0)
+    except (TypeError, ValueError):
+        amt_f = 0.0
+    if amt_f:
+        parts.append(f"¥{amt_f:.2f}")
+    return " · ".join(parts)
+
+
 def _idem_key(spec: ActionSpec, target_id: str, payload: dict) -> str:
     """幂等键：只取业务标识字段（如 product_id+adjust / order_no），忽略备注类自由文本。"""
     fields = spec.idem_fields or tuple(payload.keys())
@@ -586,8 +619,10 @@ def create_task(db, *, action_code: str, payload: dict, reason: str = "",
     db.commit()
     db.refresh(task)
     task.is_new = True              # type: ignore[attr-defined]
+    _ctx = _biz_ctx(spec, payload, quantity, amount)
     _audit(db, task.id, spec.code, "created", actor,
-           f"来源 {source}；判定：{decision.reason}")
+           f"来源 {source}；{_ctx}；判定：{decision.reason}" if _ctx
+           else f"来源 {source}；判定：{decision.reason}")
     db.commit()
 
     if decision.auto and auto_run:
@@ -766,11 +801,14 @@ def execute_task(db, task: OperationTask, actor: str, auto: bool = False) -> Ope
     if auto:
         task.auto_executed = True
     db.commit()
-    # 发货动作把实际使用的快递公司/运单号写进审计，保证「自动发什么单」可追溯
-    _extra = (f"（快递公司={payload.get('ship_company')}，运单号={payload.get('tracking_no')}）"
-              if spec.code == "ship" else "")
+    # 执行审计带上完整业务上下文：发了什么货、发给谁、多少件、多少钱、运单号
+    _ctx = _biz_ctx(spec, payload, task.quantity, task.amount)
+    if spec.code == "ship":
+        _ctx += (f"；快递 {payload.get('ship_company')} / 运单号 {payload.get('tracking_no')}"
+                 if _ctx else
+                 f"快递 {payload.get('ship_company')} / 运单号 {payload.get('tracking_no')}")
     _audit(db, task.id, task.action_code, "executed" if ok else "failed", actor,
-           f"[{task.exec_mode}] {task.exec_message}{_extra}")
+           f"[{task.exec_mode}] {task.exec_message}" + (f"（{_ctx}）" if _ctx else ""))
     db.commit()
     return task
 
@@ -834,6 +872,7 @@ def scan_candidates(read_db) -> dict:
         ship.append({
             "order_no": o.order_no,
             "customer_name": o.customer_name or "",
+            "phone": o.phone or "",
             "product_name": o.product_name or "",
             "quantity": int(o.quantity or 1),
             "total_price": round(float(o.total_price or 0), 2),
@@ -886,6 +925,7 @@ def create_tasks_from_scan(write_db, read_db, actor: str = "系统巡检") -> di
             write_db,
             action_code="restock",
             payload={"product_id": item["product_id"], "adjust": item["suggest_qty"],
+                     "product_name": item["product_name"],
                      "reason": f"智能补货：{item['severity']}（可用 {item['available']} / 预警线 {item['alert_line']}）"},
             reason=item["reason"],
             title=f"补货 · {item['product_name']} +{item['suggest_qty']} 件",
@@ -901,7 +941,12 @@ def create_tasks_from_scan(write_db, read_db, actor: str = "系统巡检") -> di
         task = create_task(
             write_db,
             action_code="ship",
-            payload={"order_no": item["order_no"], "ship_company": "", "tracking_no": ""},
+            payload={"order_no": item["order_no"], "ship_company": "", "tracking_no": "",
+                     "customer_name": item.get("customer_name", ""),
+                     "phone": item.get("phone", ""),
+                     "product_name": item.get("product_name", ""),
+                     "quantity": item.get("quantity", 1),
+                     "total_price": item.get("total_price", 0)},
             reason=item["reason"],
             title=f"发货 · {item['order_no']}（{item['product_name']}）",
             target_label=item["order_no"],
@@ -974,6 +1019,35 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
     run.pending_count = len(created_ids)
     run.hints_count = len(hints)
     run.coord_summary = json.dumps(coord_summary, ensure_ascii=False, default=str)
+
+    # 本轮涉及任务的业务明细：发了什么货、发给谁、多少件、结果如何（供自动运营记录面板展示）
+    detail_rows: list[dict] = []
+    if created_ids or auto_ids:
+        trows = write_db.execute(
+            select(OperationTask).where(OperationTask.id.in_([*created_ids, *auto_ids]))
+        ).scalars().all()
+        for t in trows:
+            try:
+                p = json.loads(t.payload or "{}")
+            except json.JSONDecodeError:
+                p = {}
+            detail_rows.append({
+                "task_id": t.id,
+                "icon": (ACTION_REGISTRY.get(t.action_code).icon
+                         if t.action_code in ACTION_REGISTRY else "•"),
+                "action": t.action_name,
+                "title": t.title,
+                "customer": p.get("customer_name") or "",
+                "product": p.get("product_name") or t.target_label or "",
+                "qty": int(t.quantity or 0),
+                "amount": round(float(t.amount or 0), 2),
+                "auto": bool(t.auto_executed),
+                "status": t.status,
+                "result": (t.exec_message or "")[:120],
+                "time": (t.executed_at or t.created_at).strftime("%m-%d %H:%M")
+                        if (t.executed_at or t.created_at) else "",
+            })
+    run.exec_detail = json.dumps(detail_rows, ensure_ascii=False)
     run.status = "ok"
     run.finished_at = datetime.now()
     if killed:
@@ -1015,6 +1089,10 @@ def autopilot_runs(db, limit: int = 20) -> list[dict]:
             scanned = json.loads(r.scanned or "{}")
         except (json.JSONDecodeError, TypeError):
             scanned = {}
+        try:
+            exec_detail = json.loads(r.exec_detail or "[]")
+        except (json.JSONDecodeError, TypeError):
+            exec_detail = []
         out.append({
             "id": r.id,
             "trigger": r.trigger,
@@ -1026,6 +1104,7 @@ def autopilot_runs(db, limit: int = 20) -> list[dict]:
             "pending_count": r.pending_count or 0,
             "hints_count": r.hints_count or 0,
             "coord_summary": (r.coord_summary or "")[:500],
+            "exec_detail": exec_detail,
             "started_at": r.started_at.strftime("%Y-%m-%d %H:%M:%S") if r.started_at else "",
             "finished_at": r.finished_at.strftime("%Y-%m-%d %H:%M:%S") if r.finished_at else "",
         })
@@ -1061,6 +1140,7 @@ def init_operation_tables() -> None:
             "ALTER TABLE operation_tasks ADD COLUMN exec_mode VARCHAR(10) DEFAULT ''",
             "ALTER TABLE autonomy_settings ADD COLUMN updated_at DATETIME NULL",
             "ALTER TABLE autopilot_runs ADD COLUMN coord_summary TEXT NULL",
+            "ALTER TABLE autopilot_runs ADD COLUMN exec_detail TEXT NULL",
         ):
             try:
                 conn.execute(_sql(ddl))
