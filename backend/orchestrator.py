@@ -212,7 +212,12 @@ def run_coordination_scan(write_db, read_db, policy: dict, actor: str = "自动�
     }
     if not enabled:
         summary["skipped"] = 1
+        summary["text"] = "跨Agent协调未开启，本轮没有检查断货和退货。"
         return summary
+
+    emitted_names: list = []
+    pending_names: list = []
+    return_names: list = []
 
     # ── Flow A：断货 → 请求前台暂停购买 ──
     paused = _active_pause_product_ids(write_db)
@@ -232,13 +237,16 @@ def run_coordination_scan(write_db, read_db, policy: dict, actor: str = "自动�
                 evt.status = CST_APPLIED
                 evt.detail = detail + "（已自动发往 ZT-agent 生效）"
                 summary["stockout_emitted"].append(pid)
+                emitted_names.append(p["product_name"])
             else:
                 evt.status = CST_PENDING
                 evt.detail = detail + f"（发送失败：{res.get('message','')}；转人工）"
                 summary["stockout_pending"].append(pid)
+                pending_names.append(p["product_name"])
         else:
             evt.status = CST_PENDING
             summary["stockout_pending"].append(pid)
+            pending_names.append(p["product_name"])
         write_db.add(evt)
     write_db.commit()
 
@@ -262,8 +270,21 @@ def run_coordination_scan(write_db, read_db, policy: dict, actor: str = "自动�
         )
         write_db.add(evt)
         summary["return_surge_flagged"].append(pid)
+        return_names.append(p["product_name"])
     write_db.commit()
 
+    # 人话版摘要（审计与报告直接引用，不再甩 JSON）
+    parts = []
+    if emitted_names:
+        parts.append("发现 " + "、".join(emitted_names) + " 已缺货，已自动通知商城前台暂停购买并挂出客户提示")
+    if pending_names:
+        parts.append("、".join(pending_names) + " 已缺货，暂停购买申请已登记，等人工确认后才会生效")
+    if return_names:
+        parts.append("、".join(return_names) + " 退货率偏高，已生成复盘提醒")
+    if parts:
+        summary["text"] = "跨Agent协调：" + "；".join(parts) + "。"
+    else:
+        summary["text"] = "跨Agent协调已开启，本轮没有发现断货或退货异常。"
     return summary
 
 

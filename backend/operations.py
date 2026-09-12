@@ -472,6 +472,26 @@ def _audit(db, task_id: int, action_code: str, event: str, actor: str, detail: s
                        actor=actor or "system", detail=(detail or "")[:500]))
 
 
+def _product_name_of(product_id) -> str:
+    """按商品 ID 查名字（只读库，查不到返回空串；任何异常都不影响主流程）。"""
+    if not product_id:
+        return ""
+    try:
+        from db import ReadSession
+        from models_readonly import Products
+        from sqlalchemy import select
+        db = ReadSession()
+        try:
+            name = db.execute(
+                select(Products.name).where(Products.id == int(product_id))
+            ).scalar_one_or_none()
+            return (name or "").strip()
+        finally:
+            db.close()
+    except Exception:
+        return ""
+
+
 def _biz_ctx(spec: "ActionSpec", payload: dict, quantity: int = 0, amount: float = 0.0) -> str:
     """把任务的业务上下文拼成一句人话（商品/订单/客户/数量/金额），用于审计留痕。
 
@@ -482,7 +502,9 @@ def _biz_ctx(spec: "ActionSpec", payload: dict, quantity: int = 0, amount: float
     if payload.get("product_name"):
         parts.append(f"商品「{payload['product_name']}」")
     elif spec.target_type == "product" and payload.get("product_id"):
-        parts.append(f"商品#{payload['product_id']}")
+        # payload 里没带商品名时查一次只读库补上，避免出现「商品#5」这种代号
+        _pname = _product_name_of(payload.get("product_id"))
+        parts.append(f"商品「{_pname}」" if _pname else f"商品#{payload['product_id']}")
     if payload.get("order_no"):
         who = payload.get("customer_name") or "客户"
         if payload.get("phone"):
@@ -620,9 +642,10 @@ def create_task(db, *, action_code: str, payload: dict, reason: str = "",
     db.refresh(task)
     task.is_new = True              # type: ignore[attr-defined]
     _ctx = _biz_ctx(spec, payload, quantity, amount)
+    _src_txt = {"scan": "自动巡检发现", "manual": "人工创建"}.get(source, f"来源：{source}")
     _audit(db, task.id, spec.code, "created", actor,
-           f"来源 {source}；{_ctx}；判定：{decision.reason}" if _ctx
-           else f"来源 {source}；判定：{decision.reason}")
+           f"{_src_txt}：{_ctx}；护栏判定：{decision.reason}" if _ctx
+           else f"{_src_txt}；护栏判定：{decision.reason}")
     db.commit()
 
     if decision.auto and auto_run:
@@ -808,7 +831,8 @@ def execute_task(db, task: OperationTask, actor: str, auto: bool = False) -> Ope
                  if _ctx else
                  f"快递 {payload.get('ship_company')} / 运单号 {payload.get('tracking_no')}")
     _audit(db, task.id, task.action_code, "executed" if ok else "failed", actor,
-           f"[{task.exec_mode}] {task.exec_message}" + (f"（{_ctx}）" if _ctx else ""))
+           ("真实执行：" if task.exec_mode == "live" else "演练验证（未实际改动数据）：")
+           + f"{task.exec_message}" + (f"。{_ctx}" if _ctx else ""))
     db.commit()
     return task
 
@@ -985,8 +1009,11 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
     write_db.commit()
     write_db.refresh(run)
 
+    # 触发方式的人话说法（用于操作人/说明列，不出现英文参数名）
+    trigger_label = "自动运营（手动触发）" if trigger == "manual" else "自动运营（定时巡检）"
+
     try:
-        result = create_tasks_from_scan(write_db, read_db, actor=f"自动运营({trigger})")
+        result = create_tasks_from_scan(write_db, read_db, actor=trigger_label)
     except Exception as e:  # 任何异常都不能让调度器崩掉
         run.status = "failed"
         run.message = f"{type(e).__name__}: {e}"[:300]
@@ -1005,7 +1032,7 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
     coord_summary = None
     try:
         coord_summary = run_coordination_scan(
-            write_db, read_db, policy, actor=f"自动运营({trigger})"
+            write_db, read_db, policy, actor=trigger_label
         )
     except Exception as e:  # 编排异常隔离，主闭环照常出报告
         coord_summary = {
@@ -1058,9 +1085,26 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
         run.message = f"本轮无需自动执行，生成待办 {len(created_ids)} 条"
     write_db.commit()
 
-    _audit(write_db, 0, "autopilot", "autopilot_run", f"自动运营({trigger})",
-           f"扫描 {scanned}；新建 {len(created_ids)}；自动执行 {len(auto_ids)}；"
-           f"跨Agent协调 {coord_summary}")
+    # 说明列用人话描述：这轮发现了什么、干了什么（绝不输出原始字典）
+    found = []
+    if int(scanned.get("restock_candidates") or 0):
+        found.append(f"{scanned['restock_candidates']} 款商品库存不足")
+    if int(scanned.get("ship_candidates") or 0):
+        found.append(f"{scanned['ship_candidates']} 笔订单等待发货")
+    if int(scanned.get("after_sale_hints") or 0):
+        found.append(f"{scanned['after_sale_hints']} 条售后线索")
+    if killed:
+        action_txt = "急停开关已打开，本轮只记录、没有执行任何动作"
+    elif auto_ids:
+        action_txt = f"自动执行了 {len(auto_ids)} 个任务"
+    elif created_ids:
+        action_txt = f"新建了 {len(created_ids)} 个待办，等人工确认"
+    else:
+        action_txt = "没有需要处理的任务"
+    scan_txt = ("发现 " + "、".join(found)) if found else "没有发现待处理的业务"
+    _coord_txt = (coord_summary or {}).get("text") or ""
+    _audit(write_db, 0, "autopilot", "autopilot_run", trigger_label,
+           f"巡检{scan_txt}；{action_txt}。{_coord_txt}")
     write_db.commit()
 
     return {
