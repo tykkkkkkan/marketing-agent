@@ -258,6 +258,12 @@ h3 {
   background: #f3fbf6;
 }
 
+/* 需关注（不等同于异常）：如「退货申请中」有单待处理 —— 是提醒而非告警 */
+.card.warn {
+  border-color: #f2dcb3;
+  background: #fffbf3;
+}
+
 .card-label {
   font-size: 12.5px;
   color: var(--muted);

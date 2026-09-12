@@ -133,9 +133,23 @@ def _out_of_stock_products(read_db) -> list[dict]:
 
 
 def _return_surge_products(read_db, threshold_pct: float) -> list[dict]:
-    """按商品统计退货率，返回超过阈值的（且样本数足够）。"""
+    """按商品统计退货率，返回超过阈值的（且样本数足够）。
+
+    ⚠️ 两处口径修正（原实现会漏报，属"数据不同步"）：
+
+      1. **分母**：原来用「该商品的全部订单」，但退货只可能来自**发过货**的订单，
+         待发货 / 已取消的单永远不可能退货，算进分母会把退货率稀释掉。
+         现在分母 = 状态 ∈ {已发货, 已完成, 退货申请中, 已退货}。
+
+      2. **分子**：原来只数 `status == '已退货'`（商家已同意）。但用户提交退货申请后
+         状态先变成「退货申请中」，**商家没点同意之前完全统计不到** ——
+         而这段时间恰恰是最该干预的窗口（货还没退回来，还有挽回余地）。
+         现在分子 = 「退货申请中」+「已退货」，并在返回里分列 `returning` / `returned`，
+         让运营一眼看出「已退几单、还有几单在申请中」。
+    """
     from models_readonly import Orders
 
+    EVER_SHIPPED = ("已发货", "已完成", "退货申请中", "已退货")
     rows = read_db.execute(
         select(
             Orders.product_id,
@@ -143,17 +157,22 @@ def _return_surge_products(read_db, threshold_pct: float) -> list[dict]:
             Orders.product_sku,
             func.count().label("total"),
             func.sum(case((Orders.status == "已退货", 1), else_=0)).label("returned"),
+            func.sum(case((Orders.status == "退货申请中", 1), else_=0)).label("returning"),
         )
+        .where(Orders.status.in_(EVER_SHIPPED))
         .group_by(Orders.product_id, Orders.product_name, Orders.product_sku)
     ).all()
 
     out = []
-    for pid, name, sku, total, returned in rows:
+    for pid, name, sku, total, returned, returning in rows:
         total = int(total or 0)
         returned = int(returned or 0)
+        returning = int(returning or 0)
+        # 退货申请中尚未退款，但从「客户体验恶化」角度已该关注，一并计入告警分子
+        risky = returned + returning
         if total < MIN_RETURN_SAMPLE:
             continue
-        rate = (returned / total) * 100 if total else 0
+        rate = (risky / total) * 100 if total else 0
         if rate >= threshold_pct:
             out.append({
                 "product_id": pid,
@@ -161,6 +180,7 @@ def _return_surge_products(read_db, threshold_pct: float) -> list[dict]:
                 "sku": sku or "",
                 "total": total,
                 "returned": returned,
+                "returning": returning,
                 "rate": round(rate, 1),
             })
     return out
@@ -229,8 +249,10 @@ def run_coordination_scan(write_db, read_db, policy: dict, actor: str = "自动�
         if pid in handled:
             continue
         detail = (
-            f"「{p['product_name']}」近 {p['total']} 单中退货 {p['returned']} 单，"
-            f"退货率 {p['rate']}% ≥ 阈值 {threshold}%；建议复盘该商品的质量/描述/售后策略。"
+            f"「{p['product_name']}」曾发货 {p['total']} 单，其中已退货 {p['returned']} 单、"
+            f"退货申请中 {p['returning']} 单，退货率 {p['rate']}% ≥ 阈值 {threshold}%；"
+            f"建议复盘该商品的质量/描述/售后策略"
+            + ("（有申请待处理，货未退回，可优先挽回）" if p.get("returning") else "。")
         )
         evt = CoordinationEvent(
             kind=KIND_RETURN_SURGE, direction=DIR_INTERNAL,

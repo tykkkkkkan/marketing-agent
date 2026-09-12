@@ -101,13 +101,19 @@ function Board({ onActOnDiagnosis }) {
   const m = diag?.metrics || {}
 
   // 指标卡：业务语言 + 一句人话释义
+  // ⚠️ 口径统一说明：这些数字全部来自 /api/analytics/diagnosis，与「收银系统」
+  // （ZT-agent）后台、C 端「我的订单」使用同一套状态口径，不再出现两边对不上：
+  //   「成交」= 已发货 + 已完成 + 退货申请中（与 ZT 个人中心成交金额口径一致）
+  //   「退货率」分母 = 曾发货订单（退货只可能来自发过货的单）
   const metricCards = [
-    { label: '近90天营业额', value: m.gmv != null ? `¥${Number(m.gmv).toLocaleString()}` : '-', tip: '所有成交订单的金额合计（GMV）' },
-    { label: '成交订单', value: m.valid_orders ?? '-', unit: '单', tip: '已付款、未取消的订单数量' },
+    { label: '近90天营业额', value: m.gmv != null ? `¥${Number(m.gmv).toLocaleString()}` : '-', tip: '成交订单的金额合计（GMV）＝已发货＋已完成＋退货申请中' },
+    { label: '成交订单', value: m.valid_orders ?? '-', unit: '单', tip: '已发货、已完成与退货申请中的订单数量（不含已取消/已退货）' },
+    { label: '待发货', value: m.pending_orders ?? m.pending_ship ?? '-', unit: '单', danger: (m.pending_orders ?? m.pending_ship ?? 0) > 0, tip: '已下单但尚未发货的订单，尽快安排发货可提升客户体验' },
+    { label: '退货申请中', value: m.returning_orders ?? '-', unit: '单', warn: (m.returning_orders ?? 0) > 0, tip: '客户已提交退货申请、商家尚未处理的订单。此时货还没退回，是挽回的最佳窗口' },
     { label: '客单价', value: m.avg_order_value != null ? `¥${m.avg_order_value}` : '-', tip: '平均每单的消费金额，反映顾客购买力' },
     { label: '回头客比例', value: m.repeat_rate != null ? `${m.repeat_rate}%` : '-', tip: '买过 2 次及以上的老客户占比' },
     { label: '库存健康度', value: m.healthy_ratio != null ? `${m.healthy_ratio}%` : '-', danger: (m.healthy_ratio ?? 100) < 70, tip: '库存充足的商品占比，预警商品越多越低' },
-    { label: '退款退货率', value: m.refund_rate != null ? `${m.refund_rate}%` : '-', ok: (m.refund_rate ?? 100) < 5, tip: '退款/退货订单占全部订单的比例' },
+    { label: '退货率', value: m.refund_rate != null ? `${m.refund_rate}%` : '-', ok: (m.refund_rate ?? 100) < 5, tip: '已退货订单 ÷ 曾发货订单。另可参考「退货申请率」看提前信号' },
   ]
 
   const maxQty = Math.max(1, ...sales.map((s) => s.sold_qty || 0))
@@ -153,7 +159,7 @@ function Board({ onActOnDiagnosis }) {
           {/* 核心指标 */}
           <div className="cards">
             {metricCards.map((c) => (
-              <div className={c.danger ? 'card danger' : c.ok ? 'card ok' : 'card'} key={c.label}>
+              <div className={c.danger ? 'card danger' : c.ok ? 'card ok' : c.warn ? 'card warn' : 'card'} key={c.label}>
                 <span className="card-label">{c.label}</span>
                 <strong className="card-value">
                   {c.value}
