@@ -130,6 +130,15 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | GET | `/api/operations/auto-pilot` | 自动运营状态：是否开启、间隔、**下一轮时间**、最近 10 轮记录 |
 | POST | `/api/operations/auto-pilot/run` | **立即跑一轮**（不等定时器，用于验证策略是否生效） |
 
+### 跨 Agent 协调（L5 多智能体编排）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/operations/coordination/events` | 协调事件列表（断货暂停 / 退货复盘 / ZT 入站退货） |
+| POST | `/api/operations/coordination/inbound` | **接收 ZT-agent 发来的事件**（如退货申请），登记为协调记录 |
+| POST | `/api/operations/coordination/{id}/apply` | 人工确认一条待确认事件（断货类立即下发 ZT 生效） |
+| POST | `/api/operations/coordination/scan` | 立即执行一轮协调巡检（不等自动运营定时器） |
+
 ## 五、运营执行层：自主化分级与护栏
 
 ### 自主化分级（对应「前期问你，后期自己干」）
@@ -216,7 +225,41 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | 原始记录 | `autopilot_runs` 表（含本轮扫到的候选 JSON，便于复盘） |
 | 进程日志 | `[autopilot] 调度器就绪…` / `[autopilot] 第 N 轮完成：…` / `[autopilot] 本轮异常已忽略：…` |
 
-## 七、Agent 工具（LangChain）
+## 七、L5 多智能体编排 ——「两个 AI 助手会互相打招呼」
+
+这是整套系统的最高层能力：营销 Agent（本服务）作为**协调中枢**，与 ZT-agent（前台客服 Agent）
+双向协同。到这里，AI 能力路线图的 L1 意图识别 → L2 知识检索 → L3 工具调用 → L4 多轮记忆
+全部补齐，进入 **L5 多智能体协同与编排**。
+
+### 三条协调流
+
+| 流向 | 触发 | 动作 |
+|---|---|---|
+| 营销 → 前台（Flow A） | 巡检发现商品**断货**（可用库存 ≤ 0） | 向 ZT-agent 发 `pause_product`：前台暂停该商品购买，并挂出客户提示「暂时缺货，可先收藏或咨询客服」 |
+| 营销内部（Flow B） | 巡检发现商品**退货率飙升**（≥ 阈值且样本 ≥ 3 单） | 生成复盘事件，提示复盘该商品的质量 / 描述 / 售后策略 |
+| 前台 → 营销 | ZT-agent 主动发来 `return_requested` | 登记 ZT 退货告知事件，供运营跟进 |
+
+### 怎么做到「零侵入」的（面试可讲）
+
+- 营销侧**只读** ZT 业务表发现信号；向 ZT 下发协调指令只走 ZT 侧新增的接收钩子
+  `POST /api/coordination/inbound/`（staff 鉴权 + **事件白名单**，非白名单事件 400 拒绝）；
+- ZT 侧协调状态放在**新建托管表 `product_coordination`**（覆盖表模式），业务表
+  `products` / `inventory` 一列不改、一行不迁；库存接口只读覆盖表做展示合并；
+- 每一次协调都落本服务的 `coordination_events` 表，谁、何时、为什么、结果如何全量可溯。
+
+### 开关与节奏
+
+| 策略项 | 默认 | 说明 |
+|---|---|---|
+| `coord_enabled` | `off` | 跨 Agent 协调总开关，**默认关闭**；关掉即整体停用 |
+| `coord_auto_apply` | `off` | `off`=只建议（转人工在面板点确认）；`on`=发现即自动下发 ZT 生效 |
+| `coord_return_surge_threshold` | `20` | 退货率告警阈值（%） |
+
+协调巡检已并入自动运营闭环（`run_autopilot` 里同步跑 `run_coordination_scan`），
+也可在前端「🤝 跨 Agent 协作」面板单独手动触发；入站接口支持 `COORD_SHARED_SECRET`
+共享密钥校验（配置后要求请求头 `X-Coord-Token` 匹配）。
+
+## 八、Agent 工具（LangChain）
 
 | 工具 | 作用 |
 |---|---|
@@ -228,7 +271,7 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 **防幻觉设计**：所有数据必须由工具提供，系统提示明确禁止编造销量/价格/库存，也不允许承诺
 「百分百上鱼」这类不可验证效果。
 
-## 八、端到端验证结果（实测）
+## 九、端到端验证结果（实测）
 
 **营销侧**
 | 环节 | 结果 |
@@ -263,20 +306,30 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | 急停对自动运营同样生效 | ✅ 急停开启后跑一轮：**只建单、零自动执行**，目标商品库存未发生任何变化 |
 | 默认关闭 | ✅ 未开启时服务行为与升级前完全一致（只在你点巡检时才工作） |
 
+**跨 Agent 协调（L5 编排，本轮新增，全部为真实调用实测）**
+| 用例 | 结果 |
+|---|---|
+| 断货自动联动（Flow A） | ✅ 商品 5（速攻2号）库存 0 → 巡检捕获 → 自动发 `pause_product` → ZT 侧库存接口返回 `purchase_paused:true` + 客户提示文案（覆盖表生效，业务表零改动） |
+| 待确认转人工 | ✅ `coord_auto_apply=off` 时断货只生成 `pending` 事件，人工点「确认下发」后才发往 ZT 并生效 |
+| ZT 入站事件 | ✅ `POST /coordination/inbound` 收 `return_requested` → 登记协调事件；未知事件 → 400 拒绝 |
+| 幂等去重 | ✅ 同一断货商品在事件未处理前重复巡检不会重复下发 |
+| 并入自动运营 | ✅ `POST /auto-pilot/run` 返回体含 `coordination` 摘要，`autopilot_runs.coord_summary` 留痕 |
+| 总开关收敛 | ✅ `coord_enabled=off` 时巡检直接跳过（`skipped:1`），零外部调用 |
+
 > 说明：以上自动执行验证完成后已将库存**原路回滚到验证前数值**，并核对全部 6 个商品的库存、
 > 预留量、预警线与订单状态与验证前**逐字段一致**，不留测试残留。
 
-## 九、设计约束
+## 十、设计约束
 
 | 约束 | 说明 |
 |---|---|
 | **只读业务表** | 对 `orders` / `products` / `inventory` 等只 SELECT，`db.py` 内置守卫拦截任何写语句（运行时硬约束，不是口头约定） |
-| **写只走自管表** | 只写本服务新建的表（草稿 / 任务单 / 审计 / 策略） |
+| **写只走自管表** | 只写本服务新建的表（草稿 / 任务单 / 审计 / 策略 / 协调事件） |
 | **改业务走 ZT-agent 接口** | 需变更库存订单时，调用 ZT-agent 自身管理接口，由其保障事务与业务规则 |
-| **不改 ZT-agent** | ZT-agent 零代码改动，可独立 `git pull && docker compose up` |
-| **人工兜底** | 文案必须审核才发布；不可逆/涉资金动作必须人工审批 |
+| **ZT 侧只加过一个接收钩子** | L5 协调需要在 ZT-agent 加 `POST /api/coordination/inbound/`（staff 鉴权 + 事件白名单 + 新建托管表），业务逻辑零改动；此前 ZT-agent 零代码改动 |
+| **人工兜底** | 文案必须审核才发布；不可逆/涉资金动作必须人工审批；协调指令默认转人工确认 |
 
-## 十、配置项
+## 十一、配置项
 
 完整模板见 [`.env.example`](./.env.example)（复制为 `.env`，已被 `.gitignore` 忽略）。
 
@@ -289,15 +342,17 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | `MKT_EXECUTE_MODE` | `live` 真实执行 / `dry_run` 演练（页面上也可随时切换） |
 | `ZT_AGENT_TIMEOUT` | 调用超时秒数 |
 | `AUTOPILOT_DISABLED` | 留空=调度器正常随服务启动；`1`/`true`/`on`/`yes`=**强制不启动**（运维总闸） |
+| `COORD_SHARED_SECRET` | 可选。配置后，ZT→营销 的协调入站接口要求请求头 `X-Coord-Token` 与之匹配（生产建议配置） |
 
 > 自动运营开关（`autopilot_enabled`）与间隔（`autopilot_interval_minutes`）属于**策略项**，
 > 存在数据库 `autonomy_settings` 表里、可在页面上随时改，**不通过环境变量配置**。
+> L5 协调三项（`coord_enabled` / `coord_auto_apply` / `coord_return_surge_threshold`）同理，页面可改。
 
 > **已为营销 Agent 单独建了机器人账号 `mkt_bot`**（不是复用超级管理员）：`is_staff=True` / `is_superuser=False`，
 > 最小权限、可随时在 ZT-agent 后台停用，且 ZT-agent 侧的审计日志能区分「人操作（admin）」与「Agent 操作（mkt_bot）」。
 > 建号脚本在 ZT-agent 仓库：`python create_staff_bot.py`（幂等，重复执行只重置为最小权限）。
 
-## 十一、踩坑记录
+## 十二、踩坑记录
 
 1. **uv 在中文路径下卡死** → venv 建到无中文路径（`D:/TYKKKKKK/.venvs/marketing-agent`）。
 2. **PyPI 官方源极慢**（5 分钟无果）→ 用清华源 `--index-url https://pypi.tuna.tsinghua.edu.cn/simple`，29 秒装完。
@@ -316,3 +371,10 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 12. **`uv` 建的 venv 没有 pip**（`No module named pip`）→ 装依赖要用
     `uv pip install --python <venv>/Scripts/python.exe -r requirements.txt`，并且**遵守 requirements 的版本约束**
     （`html-to-docx` 要求 `lxml>=5.2,<6`，直接装 lxml 6.x 会出问题）。
+13. **MySQL 的 `TEXT` 列不接受 `DEFAULT ''`** → `ALTER TABLE ... ADD COLUMN coord_summary TEXT DEFAULT ''`
+    会直接报错；且 `init_operation_tables` 里的 ALTER 语句包在 try/except 里静默吞掉，列没加上、
+    后续写入才爆 `OperationalError`。改用 `TEXT NULL`；教训：**建表 ALTER 失败不该静默吞掉**，
+    至少要打印一行警告。
+14. **SQLAlchemy 没有 `func.case`** → 条件聚合要 `func.sum(case((cond, 1), else_=0))`
+    （`case` 从 `sqlalchemy` 导入），写成 `func.case((cond,1), else_=0)` 会报
+    `Function.__init__() got an unexpected keyword argument 'else_'`。

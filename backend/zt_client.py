@@ -207,6 +207,26 @@ class ZTAgentClient:
         return self.call("POST", f"/api/orders/{order_no}/cancel/",
                          {"cancel_reason": reason})
 
+    def coordinate(self, event: str, product_id: int, notice: str = "",
+                   source: str = "marketing-agent") -> dict:
+        """L5 编排：向 ZT-agent 接收钩子发送跨 Agent 协调指令。
+
+        POST /api/coordination/inbound/
+          {"event": "pause_product"|"resume_product"|"set_notice",
+           "product_id": N, "customer_notice": "...", "source": "marketing-agent"}
+
+        dry_run 模式只回显请求、不真实发送；真实发送时由 ZT-agent 写入
+        product_coordination 覆盖表（绝不碰业务表）。
+        """
+        payload = {
+            "event": event,
+            "product_id": int(product_id),
+            "source": source,
+        }
+        if notice:
+            payload["customer_notice"] = notice
+        return self.call("POST", "/api/coordination/inbound/", payload)
+
     # ── 连通性自检（供 /api/operations/zt-status 使用）──────────
     def status(self) -> dict:
         """不抛异常地汇报 ZT-agent 可达性 + 凭据状态（供运营页面展示）"""

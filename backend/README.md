@@ -14,6 +14,7 @@ backend/
 ├── marketing_agent.py      LangChain 编排（1.x create_agent + DeepSeek）
 ├── drafts.py               自管表 marketing_drafts（文案草稿）
 ├── operations.py           运营执行层：动作注册表 + 护栏引擎 + 任务状态机 + 审计 + 自动运营
+├── orchestrator.py         L5 多智能体编排：跨 Agent 协调（断货联动 / 退货复盘 / ZT 入站事件）
 ├── autopilot.py            自动运营调度器（无人值守：进程内 asyncio 循环，默认关闭）
 ├── zt_client.py            执行器：以「后台操作员」身份调用 ZT-agent 管理接口（HTTP + JWT）
 ├── routers/
@@ -46,7 +47,7 @@ ZT-agent 没起时，只有「执行」能力不可用，看板、文案等功�
 将来万一手滑写了写操作，会在测试阶段就暴露，而不是悄悄污染 ZT-agent 的数据。
 
 写入走另一条 `write_engine`，且只被自管表使用（`marketing_drafts` / `operation_tasks` /
-`action_audit_log` / `autonomy_settings` / `autopilot_runs`）。
+`action_audit_log` / `autonomy_settings` / `autopilot_runs` / `coordination_events`）。
 
 配置加载顺序（`db.py` 与 `zt_client.py` 保持一致）：
 `backend/.env → marketing-agent/.env → ZT-agent/.env`，都缺失时才落到代码内置默认值。
@@ -71,4 +72,5 @@ curl http://127.0.0.1:8010/api/marketing/stats          # 草稿状态统计
 curl http://127.0.0.1:8010/api/operations/zt-status     # 收银系统连通性 + 凭据 + 执行模式
 curl http://127.0.0.1:8010/api/operations/tasks         # 运营待办列表
 curl http://127.0.0.1:8010/api/operations/auto-pilot    # 自动运营状态 + 最近运行记录
+curl http://127.0.0.1:8010/api/operations/coordination/events   # 跨 Agent 协调事件列表
 ```

@@ -42,6 +42,7 @@ export default function Operations() {
   const [showSettings, setShowSettings] = useState(false)
   const [showAudit, setShowAudit] = useState(false)
   const [showAuto, setShowAuto] = useState(false)
+  const [showCoord, setShowCoord] = useState(false)
   const [expanded, setExpanded] = useState(null)
   const [note, setNote] = useState('')
 
@@ -151,6 +152,9 @@ export default function Operations() {
           <button className="btn ghost" onClick={() => setShowAuto(!showAuto)}>
             {showAuto ? '收起自动运营记录' : '🤖 自动运营记录'}
           </button>
+          <button className="btn ghost" onClick={() => setShowCoord(!showCoord)}>
+            {showCoord ? '收起跨 Agent 协作' : '🤝 跨 Agent 协作'}
+          </button>
           <button className="btn ghost" onClick={() => setShowSettings(!showSettings)}>
             {showSettings ? '收起自主化设置' : '⚙️ 自主化设置'}
           </button>
@@ -195,6 +199,17 @@ export default function Operations() {
               {autoOn ? (killed ? '已开启（被急停拦截）' : '运行中') : '未开启'}
             </span>
             {autoOn && auto.next_run_at && <span className="muted small">下一轮 {auto.next_run_at}</span>}
+          </span>
+          <span className="autobar-item">
+            <b>跨Agent协作</b>
+            <span className={policy.coord_enabled === 'on' ? 'pill ok' : 'pill'}>
+              {policy.coord_enabled === 'on'
+                ? `已开启${policy.coord_auto_apply === 'on' ? '（自动下发）' : '（转人工确认）'}`
+                : '未开启'}
+            </span>
+            {stats.coord_pending_count > 0 && (
+              <span className="pill warn">{stats.coord_pending_count} 条待确认</span>
+            )}
           </span>
         </div>
         <div className="autobar-btns">
@@ -304,12 +319,45 @@ export default function Operations() {
               />
               <span className="tip">建议 30~120 分钟；太频繁没有意义，数据变化没那么快。</span>
             </label>
+            <label>
+              跨 Agent 协作总开关
+              <select
+                value={policy.coord_enabled || 'off'}
+                onChange={(e) => savePolicy({ coord_enabled: e.target.value })}
+              >
+                <option value="off">关闭（两个 Agent 各干各的）</option>
+                <option value="on">开启（与前台客服 Agent 联动）</option>
+              </select>
+              <span className="tip">开启后：断货自动通知前台挂提示，退货飙升生成复盘任务。</span>
+            </label>
+            <label>
+              协调指令自动下发
+              <select
+                value={policy.coord_auto_apply || 'off'}
+                onChange={(e) => savePolicy({ coord_auto_apply: e.target.value })}
+              >
+                <option value="off">转人工（只建议，我来点确认）</option>
+                <option value="on">自动（发现即下发到前台生效）</option>
+              </select>
+              <span className="tip">建议先用「转人工」观察一段时间，再放开自动。</span>
+            </label>
+            <label>
+              退货率告警阈值（%）
+              <input
+                defaultValue={policy.coord_return_surge_threshold || ''}
+                onBlur={(e) => savePolicy({ coord_return_surge_threshold: e.target.value })}
+              />
+              <span className="tip">某商品退货率超过该值即标记「需复盘」；样本不足 3 单不触发。</span>
+            </label>
           </div>
         </div>
       )}
 
       {/* ── 自动运营记录 ── */}
       {showAuto && <AutoPanel auto={auto} onRunNow={runAutoNow} busy={busy} />}
+
+      {/* ── 跨 Agent 协作 ── */}
+      {showCoord && <CoordPanel busy={busy} run={run} enabled={policy.coord_enabled === 'on'} />}
 
       {/* ── 操作记录 ── */}
       {showAudit && <AuditPanel />}
@@ -567,6 +615,129 @@ function AutoPanel({ auto, onRunNow, busy }) {
       {runs.length === 0 && (
         <p className="muted">
           还没有执行记录。点「▶ 立即跑一轮」试一次，就会在这里看到。
+        </p>
+      )}
+    </div>
+  )
+}
+
+/* ─────────────── 跨 Agent 协作面板（L5 编排） ─────────────── */
+const KIND_LABEL = {
+  stockout_pause: '🚫 断货暂停购买',
+  return_surge: '📉 退货率飙升',
+  inbound_return: '↩️ ZT退货告知',
+}
+const DIR_LABEL = {
+  'marketing→zt': '营销 → 前台',
+  'zt→marketing': '前台 → 营销',
+  internal: '营销内部',
+}
+const COORD_CLS = {
+  applied: 'pill ok',
+  pending: 'pill warn',
+  received: 'pill info',
+  resolved: 'pill',
+  skipped: 'pill',
+}
+
+function CoordPanel({ busy, run, enabled }) {
+  const [events, setEvents] = useState([])
+  const [kinds, setKinds] = useState({})
+
+  const loadEvents = useCallback(() => {
+    api.coordEvents(50)
+      .then((r) => {
+        setEvents(r?.data?.items || [])
+        setKinds(r?.data?.kinds || {})
+      })
+      .catch(() => {})
+  }, [])
+  useEffect(loadEvents, [loadEvents])
+
+  const doCoordScan = () =>
+    run('coord-scan', async () => {
+      const res = await api.coordScan()
+      const d = res?.data || {}
+      loadEvents()
+      return {
+        message:
+          `协调巡检完成：自动下发 ${d.stockout_emitted?.length || 0} 条，` +
+          `转人工 ${d.stockout_pending?.length || 0} 条，` +
+          `退货复盘 ${d.return_surge_flagged?.length || 0} 条`,
+      }
+    })
+
+  const doApply = (id) =>
+    run(`coord-${id}`, async () => {
+      const res = await api.coordApply(id)
+      loadEvents()
+      return { message: res?.message || '已处理' }
+    })
+
+  return (
+    <div className="panel">
+      <div className="row-between">
+        <h3>
+          跨 Agent 协作（L5 多智能体编排）
+          <span className={enabled ? 'pill ok' : 'pill'} style={{ marginLeft: 8 }}>
+            {enabled ? '已开启' : '未开启'}
+          </span>
+        </h3>
+        <button className="btn ghost" onClick={doCoordScan} disabled={busy === 'coord-scan'}>
+          {busy === 'coord-scan' ? '巡检中…' : '🔄 立即协调巡检'}
+        </button>
+      </div>
+      <p className="panel-sub">
+        这是两个 AI 助手「互相打招呼」的地方：<b>营销助手</b>发现商品断货 →
+        通知<b>前台客服助手</b>暂停购买、挂出缺货提示，避免客户下单买不到的东西；
+        前台收到退货申请 → 通知营销助手复盘该商品的售后策略。
+        所有往来都留痕在下面，可以在「自主化设置」里控制是否自动下发。
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>方向</th>
+            <th>类型</th>
+            <th>商品</th>
+            <th>说明</th>
+            <th>状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {events.map((e) => (
+            <tr key={e.id}>
+              <td className="nowrap">{e.created_at}</td>
+              <td className="nowrap">{DIR_LABEL[e.direction] || e.direction}</td>
+              <td className="nowrap">{KIND_LABEL[e.kind] || kinds[e.kind] || e.kind}</td>
+              <td className="nowrap">{e.product_name || `#${e.product_id}`}</td>
+              <td className="muted">{e.detail}</td>
+              <td>
+                <span className={COORD_CLS[e.status] || 'pill'}>
+                  {e.status === 'applied' && '已下发生效'}
+                  {e.status === 'pending' && '待确认'}
+                  {e.status === 'received' && '已登记'}
+                  {e.status === 'resolved' && '已处理'}
+                  {e.status === 'skipped' && '已跳过'}
+                </span>
+              </td>
+              <td>
+                {e.status === 'pending' && (
+                  <button className="btn primary sm" onClick={() => doApply(e.id)} disabled={busy === `coord-${e.id}`}>
+                    {busy === `coord-${e.id}` ? '处理中…' : '✓ 确认下发'}
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {events.length === 0 && (
+        <p className="muted">
+          暂无协调事件。开启「跨 Agent 协作总开关」后点「🔄 立即协调巡检」，
+          系统会检查断货与退货情况并生成协调记录。
         </p>
       )}
     </div>

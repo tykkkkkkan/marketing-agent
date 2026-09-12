@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
         init_operation_tables()
         print("[startup] 运营执行层自管表就绪（operation_tasks / action_audit_log / "
-              "autonomy_settings / autopilot_runs）")
+              "autonomy_settings / autopilot_runs / coordination_events）")
     except Exception as e:
         print(f"[warn] 运营执行层建表跳过：{type(e).__name__}: {e}")
 
@@ -60,14 +60,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="中渔小助 · 营销自动化 Agent",
-    version="0.5.0",
+    version="0.6.0",
     description=(
         "面向 B 端的营销自动化服务：\n\n"
         "· **只读消费** ZT-agent 的业务数据（库存/订单/咨询/知识库）；\n"
         "· 由 LangChain 编排生成营销文案，经人工审核后发布；\n"
         "· **运营执行层**：把 AI 建议变成可审批、可执行、可追溯的工单，"
         "支持补货 / 发货 / 售后等动作的自主化分级（L0~L3）与护栏管控；\n"
-        "· **自动运营**：可开启定时巡检，按策略自动干活并出报告（默认关闭）。"
+        "· **自动运营**：可开启定时巡检，按策略自动干活并出报告（默认关闭）；\n"
+        "· **L5 多智能体编排**：与 ZT-agent 双向协调——断货联动暂停购买、"
+        "退货飙升复盘、接收 ZT 入站事件（默认关闭，coord_enabled 控制）。"
     ),
     lifespan=lifespan,
 )

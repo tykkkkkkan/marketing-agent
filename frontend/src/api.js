@@ -52,4 +52,10 @@ export const api = {
   autoPilot: () => unwrap(http.get('/operations/auto-pilot')),
   autoPilotRun: (trigger = 'manual') =>
     unwrap(http.post('/operations/auto-pilot/run', null, { params: { trigger } })),
+  // L5 多智能体编排（跨 Agent 协调）
+  coordEvents: (limit = 50) =>
+    unwrap(http.get('/operations/coordination/events', { params: { limit } })),
+  coordApply: (id) =>
+    unwrap(http.post(`/operations/coordination/${id}/apply`, { actor: '运营-汤' })),
+  coordScan: () => unwrap(http.post('/operations/coordination/scan')),
 }

@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import os
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,6 +40,11 @@ from operations import (
     today_auto_count, update_payload,
 )
 from zt_client import ZTAgentError, client as zt
+from orchestrator import (
+    CST_PENDING, KIND_INBOUND_RETURN, KIND_RETURN_SURGE, KIND_STOCKOUT_PAUSE,
+    CoordinationEvent, apply_pending_event, coordination_events_list,
+    handle_inbound_from_zt, run_coordination_scan,
+)
 
 router = APIRouter(prefix="/api/operations", tags=["运营执行"])
 
@@ -59,6 +66,10 @@ class PolicyUpdate(BaseModel):
     daily_auto_quota: str | None = Field(None, description="每日自动执行次数配额")
     autopilot_enabled: str | None = Field(None, description="on/off —— 是否开启定时自动运营")
     autopilot_interval_minutes: str | None = Field(None, description="自动运营间隔（分钟）")
+    # ── L5 多智能体编排 ──
+    coord_enabled: str | None = Field(None, description="on/off —— 跨 Agent 协调总开关")
+    coord_auto_apply: str | None = Field(None, description="on/off —— 是否自动把协调指令下发到 ZT-agent")
+    coord_return_surge_threshold: str | None = Field(None, description="退货率告警阈值（%），超过即标记需复盘")
     actor: str = Field("运营", max_length=50, description="操作人")
 
 
@@ -317,6 +328,9 @@ def stats(db: Session = Depends(get_write_session)):
         select(func.count(OperationTask.id)).where(OperationTask.auto_executed.is_(True))
     ).scalar() or 0)
     policy = get_policy(db)
+    coord_pending = int(db.execute(
+        select(func.count(CoordinationEvent.id)).where(CoordinationEvent.status == CST_PENDING)
+    ).scalar() or 0)
     return {"success": True, "message": "ok", "data": {
         "total": total, "by_status": by_status,
         "auto_executed_total": auto_cnt,
@@ -327,7 +341,115 @@ def stats(db: Session = Depends(get_write_session)):
         "execute_mode": policy.get("execute_mode"),
         "autopilot_enabled": policy.get("autopilot_enabled"),
         "autopilot_interval_minutes": policy.get("autopilot_interval_minutes"),
+        # ── L5 多智能体编排 ──
+        "coord_enabled": policy.get("coord_enabled"),
+        "coord_auto_apply": policy.get("coord_auto_apply"),
+        "coord_return_surge_threshold": policy.get("coord_return_surge_threshold"),
+        "coord_pending_count": coord_pending,
     }}
+
+
+# ════════════════════════════════════════════════════════════════
+# L5 多智能体编排：跨 Agent 协调
+# ════════════════════════════════════════════════════════════════
+class CoordinationInboundRequest(BaseModel):
+    event: str = Field(..., description="ZT-agent 发来的事件，如 return_requested")
+    product_id: int = Field(0, description="关联商品 ID")
+    product_name: str = Field("", description="商品名（可选，便于展示）")
+    sku: str = Field("", description="SKU（可选）")
+    detail: str = Field("", description="事件说明")
+    payload: dict = Field(default_factory=dict, description="原始数据透传")
+
+
+class CoordinationApplyRequest(BaseModel):
+    actor: str = Field("运营", max_length=50, description="处理人")
+
+
+def _coord_auth(x_coord_token: str = Header("", alias="X-Coord-Token")) -> None:
+    """协调入站鉴权：若配置了 COORD_SHARED_SECRET，则要求携带匹配的令牌；
+    未配置时（开发环境）放行，方便联调。生产应始终配置。"""
+    secret = (os.getenv("COORD_SHARED_SECRET") or "").strip()
+    if secret and x_coord_token != secret:
+        raise HTTPException(status_code=401, detail="协调令牌无效")
+
+
+@router.get("/coordination/events", summary="跨 Agent 协调事件列表")
+def list_coordination_events(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_write_session),
+):
+    """查看营销 Agent 与 ZT-agent 之间所有的协调事件（断货暂停/退货飙升/入站退货）。"""
+    rows = coordination_events_list(db, limit=limit)
+    pending = [r for r in rows if r["status"] == CST_PENDING]
+    return {"success": True, "message": "ok", "data": {
+        "total": len(rows),
+        "pending_count": len(pending),
+        "items": rows,
+        "kinds": {
+            KIND_STOCKOUT_PAUSE: "断货→请求前台暂停购买",
+            KIND_RETURN_SURGE: "退货率飙升→营销侧复盘",
+            KIND_INBOUND_RETURN: "ZT 主动告知：退货申请",
+        },
+    }}
+
+
+@router.post("/coordination/inbound", summary="接收 ZT-agent 发来的协调事件")
+def coordination_inbound(
+    req: CoordinationInboundRequest,
+    _: None = Depends(_coord_auth),
+    db: Session = Depends(get_write_session),
+):
+    """ZT-agent 主动通知营销侧的事件入口（如某商品退货申请）。
+    合法事件会被登记为一条协调事件，由运营在面板里处理。"""
+    payload = dict(req.payload or {})
+    if req.product_id:
+        payload.setdefault("product_id", req.product_id)
+    if req.product_name:
+        payload.setdefault("product_name", req.product_name)
+    if req.sku:
+        payload.setdefault("sku", req.sku)
+    if req.detail:
+        payload.setdefault("detail", req.detail)
+    try:
+        res = handle_inbound_from_zt(db, req.event, payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"事件处理失败：{type(e).__name__}: {e}")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("message", "事件不被支持"))
+    return {"success": True, "message": res.get("message", "已登记"), "data": res.get("data", {})}
+
+
+@router.post("/coordination/{event_id}/apply", summary="处理一条待确认协调事件")
+def apply_coordination_event(
+    event_id: int,
+    req: CoordinationApplyRequest,
+    db: Session = Depends(get_write_session),
+):
+    """人工确认一条待处理协调事件：
+       · 断货暂停类 → 立即把「暂停购买」指令下发到 ZT-agent 生效；
+       · 其他类型 → 标记已处理。"""
+    try:
+        res = apply_pending_event(db, event_id, actor=req.actor)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"处理失败：{type(e).__name__}: {e}")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("message", "处理失败"))
+    return {"success": True, "message": res.get("message", "已处理"), "data": res.get("data", {})}
+
+
+@router.post("/coordination/scan", summary="立即执行一轮跨 Agent 协调巡检")
+def coordination_scan_now(
+    read_db: Session = Depends(get_read_session),
+    write_db: Session = Depends(get_write_session),
+):
+    """手动跑一轮协调巡检（不依赖自动运营是否开启）：
+       断货→建/发暂停事件；退货率飙升→建复盘事件。"""
+    policy = get_policy(write_db)
+    try:
+        summary = run_coordination_scan(write_db, read_db, policy, actor="手动巡检")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"协调巡检失败：{type(e).__name__}: {e}")
+    return {"success": True, "message": "协调巡检完成", "data": summary}
 
 
 # ════════════════════════════════════════════════════════════════

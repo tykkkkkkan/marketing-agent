@@ -44,6 +44,7 @@ from sqlalchemy import (
 
 from db import read_engine, write_engine
 from drafts import OwnBase
+from orchestrator import run_coordination_scan, init_coordination_tables
 from zt_client import ZTAgentError, client as zt
 
 # ════════════════════════════════════════════════════════════════
@@ -154,6 +155,7 @@ class AutopilotRun(OwnBase):
     auto_count = Column(Integer, default=0)           # 自动执行数
     pending_count = Column(Integer, default=0)        # 转人工数
     hints_count = Column(Integer, default=0)          # 售后线索数
+    coord_summary = Column(Text, default="")           # L5 跨 Agent 协调巡检摘要（JSON）
     started_at = Column(DateTime, default=datetime.now)
     finished_at = Column(DateTime, nullable=True)
 
@@ -258,6 +260,10 @@ POLICY_DEFAULTS: dict[str, str] = {
     # ── 自动运营（无人值守）──
     "autopilot_enabled": "off",      # on / off —— 是否开启定时自动巡检
     "autopilot_interval_minutes": "30",  # 自动巡检间隔（分钟）
+    # ── L5 多智能体编排：跨 Agent 协调 ──
+    "coord_enabled": "off",          # on / off —— 总开关（关掉即整体停用跨 Agent 协调）
+    "coord_auto_apply": "off",       # on / off —— on=自动发往 ZT；off=只建议、转人工确认
+    "coord_return_surge_threshold": "20",  # 退货率阈值（%），超过即标记「需复盘」
 }
 
 POLICY_LABELS = {
@@ -271,6 +277,9 @@ POLICY_LABELS = {
     "daily_auto_quota": "每日自动执行配额(次)",
     "autopilot_enabled": "自动运营开关",
     "autopilot_interval_minutes": "自动巡检间隔(分钟)",
+    "coord_enabled": "跨Agent协调总开关",
+    "coord_auto_apply": "协调自动下发ZT",
+    "coord_return_surge_threshold": "退货率告警阈值(%)",
 }
 
 
@@ -908,11 +917,24 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
     policy = get_policy(write_db)
     killed = policy.get("kill_switch") == "on"
 
+    # ── L5 多智能体编排：跨 Agent 协调巡检（独立 try，失败不拖垮整轮）──
+    coord_summary = None
+    try:
+        coord_summary = run_coordination_scan(
+            write_db, read_db, policy, actor=f"自动运营({trigger})"
+        )
+    except Exception as e:  # 编排异常隔离，主闭环照常出报告
+        coord_summary = {
+            "enabled": (policy.get("coord_enabled") == "on"),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
     run.scanned = json.dumps(scanned, ensure_ascii=False)
     run.created_count = len(created_ids)
     run.auto_count = len(auto_ids)
     run.pending_count = len(created_ids)
     run.hints_count = len(hints)
+    run.coord_summary = json.dumps(coord_summary, ensure_ascii=False, default=str)
     run.status = "ok"
     run.finished_at = datetime.now()
     if killed:
@@ -924,7 +946,8 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
     write_db.commit()
 
     _audit(write_db, 0, "autopilot", "autopilot_run", f"自动运营({trigger})",
-           f"扫描 {scanned}；新建 {len(created_ids)}；自动执行 {len(auto_ids)}")
+           f"扫描 {scanned}；新建 {len(created_ids)}；自动执行 {len(auto_ids)}；"
+           f"跨Agent协调 {coord_summary}")
     write_db.commit()
 
     return {
@@ -938,6 +961,7 @@ def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
         "pending_count": run.pending_count,
         "hints": hints,
         "kill_switch_on": killed,
+        "coordination": coord_summary,
     }
 
 
@@ -962,6 +986,7 @@ def autopilot_runs(db, limit: int = 20) -> list[dict]:
             "auto_count": r.auto_count or 0,
             "pending_count": r.pending_count or 0,
             "hints_count": r.hints_count or 0,
+            "coord_summary": (r.coord_summary or "")[:500],
             "started_at": r.started_at.strftime("%Y-%m-%d %H:%M:%S") if r.started_at else "",
             "finished_at": r.finished_at.strftime("%Y-%m-%d %H:%M:%S") if r.finished_at else "",
         })
@@ -988,12 +1013,15 @@ def init_operation_tables() -> None:
         tables=[OperationTask.__table__, ActionAudit.__table__,
                 AutonomySetting.__table__, AutopilotRun.__table__],
     )
+    # L5 编排表（跨 Agent 协调事件日志）
+    init_coordination_tables()
     with write_engine.begin() as conn:
         for ddl in (
             "ALTER TABLE operation_tasks ADD COLUMN auto_executed TINYINT(1) DEFAULT 0",
             "ALTER TABLE operation_tasks ADD COLUMN idem_key VARCHAR(120) DEFAULT ''",
             "ALTER TABLE operation_tasks ADD COLUMN exec_mode VARCHAR(10) DEFAULT ''",
             "ALTER TABLE autonomy_settings ADD COLUMN updated_at DATETIME NULL",
+            "ALTER TABLE autopilot_runs ADD COLUMN coord_summary TEXT NULL",
         ):
             try:
                 conn.execute(_sql(ddl))
