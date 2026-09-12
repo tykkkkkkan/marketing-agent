@@ -293,8 +293,9 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 > 自动运营开关（`autopilot_enabled`）与间隔（`autopilot_interval_minutes`）属于**策略项**，
 > 存在数据库 `autonomy_settings` 表里、可在页面上随时改，**不通过环境变量配置**。
 
-> **建议为营销 Agent 单独建一个机器人账号**，而不是复用超级管理员：最小权限、可随时停用，
-> 且 ZT-agent 侧的审计日志能区分「人操作」与「Agent 操作」。
+> **已为营销 Agent 单独建了机器人账号 `mkt_bot`**（不是复用超级管理员）：`is_staff=True` / `is_superuser=False`，
+> 最小权限、可随时在 ZT-agent 后台停用，且 ZT-agent 侧的审计日志能区分「人操作（admin）」与「Agent 操作（mkt_bot）」。
+> 建号脚本在 ZT-agent 仓库：`python create_staff_bot.py`（幂等，重复执行只重置为最小权限）。
 
 ## 十一、踩坑记录
 
