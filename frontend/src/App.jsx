@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
+import Operations from './Operations'
 
 const CHANNELS = ['朋友圈', '社群', '公众号', '短视频口播', '短信', '直播']
 const TONES = ['促销', '专业', '温情', '幽默', '种草']
@@ -29,6 +30,7 @@ export default function App() {
       <nav className="tabs">
         {[
           ['board', '经营看板'],
+          ['ops', '运营任务'],
           ['generate', '写营销文案'],
           ['review', '审核台'],
         ].map(([key, label]) => (
@@ -40,12 +42,14 @@ export default function App() {
 
       <main className="content">
         {tab === 'board' && <Board onActOnDiagnosis={actOnDiagnosis} />}
+        {tab === 'ops' && <Operations />}
         {tab === 'generate' && <Generator initialBrief={seedBrief} onGenerated={() => setTab('review')} />}
         {tab === 'review' && <ReviewDesk />}
       </main>
 
       <footer className="footer">
-        数据来源：中渔天下收银系统（ZT-agent）实时同步 · 本工具仅查看经营数据，不会修改任何一笔业务记录
+        数据来源：中渔天下收银系统（ZT-agent）实时同步 · 查看数据不写入业务库；确需变更时，
+        由系统以「操作员」身份调用收银系统自身接口完成，全程留痕可追溯
       </footer>
     </div>
   )

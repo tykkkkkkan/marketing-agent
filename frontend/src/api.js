@@ -26,4 +26,26 @@ export const api = {
   review: (id, payload) => unwrap(http.post(`/marketing/drafts/${id}/review`, payload)),
   removeDraft: (id) => unwrap(http.delete(`/marketing/drafts/${id}`)),
   stats: () => unwrap(http.get('/marketing/stats')),
+
+  // ── 运营执行层（让 Agent 真正去办事：补货 / 发货 / 售后）──
+  actions: () => unwrap(http.get('/operations/actions')),
+  policy: () => unwrap(http.get('/operations/policy')),
+  updatePolicy: (payload) => unwrap(http.put('/operations/policy', payload)),
+  killSwitch: (on) => unwrap(http.post('/operations/kill-switch', { on, actor: '运营-汤' })),
+  ztStatus: () => unwrap(http.get('/operations/zt-status')),
+  scanPreview: () => unwrap(http.get('/operations/scan-preview')),
+  scan: (actor = '运营-汤') => unwrap(http.post('/operations/scan', null, { params: { actor } })),
+  tasks: (status = '', actionCode = '') =>
+    unwrap(http.get('/operations/tasks', { params: { status, action_code: actionCode } })),
+  task: (id) => unwrap(http.get(`/operations/tasks/${id}`)),
+  createTask: (payload) => unwrap(http.post('/operations/tasks', payload)),
+  patchTask: (id, payload) => unwrap(http.patch(`/operations/tasks/${id}`, { payload })),
+  approveTask: (id, note = '') =>
+    unwrap(http.post(`/operations/tasks/${id}/approve`, { actor: '运营-汤', note, execute_now: true })),
+  rejectTask: (id, note = '') =>
+    unwrap(http.post(`/operations/tasks/${id}/reject`, { actor: '运营-汤', note, execute_now: false })),
+  cancelTask: (id, note = '') =>
+    unwrap(http.post(`/operations/tasks/${id}/cancel`, { actor: '运营-汤', note, execute_now: false })),
+  opsStats: () => unwrap(http.get('/operations/stats')),
+  opsAudit: (limit = 30) => unwrap(http.get('/operations/audit', { params: { limit } })),
 }

@@ -21,4 +21,5 @@ build/
 # 编辑器
 .idea/
 .vscode/
+.trae/
 .DS_Store

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>营销自动化 Agent · 运营执行层与 API 接口说明</title>
+<style>
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #1f2d2a; line-height: 1.75; }
+  h1 { color: #1F6B54; border-bottom: 3px solid #1F6B54; padding-bottom: 10px; font-size: 24px; }
+  h2 { color: #1F6B54; border-left: 5px solid #1F6B54; padding-left: 12px; margin-top: 30px; font-size: 19px; }
+  h3 { color: #2e8b6e; font-size: 16px; margin-top: 22px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+  th { background: #1F6B54; color: #fff; padding: 8px 10px; text-align: left; border: 1px solid #1F6B54; }
+  td { padding: 7px 10px; border: 1px solid #dde7e3; vertical-align: top; }
+  tr:nth-child(even) td { background: #f7fbf9; }
+  code { background: #eef4f2; color: #1F6B54; padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; font-size: 12.5px; }
+  .lead { background: #f3f8f6; border-left: 4px solid #1F6B54; padding: 12px 16px; margin: 14px 0; }
+  .warn { background: #fffaf0; border-left: 4px solid #d68910; padding: 12px 16px; margin: 14px 0; }
+  .ok { background: #eef7f2; border-left: 4px solid #1e8449; padding: 12px 16px; margin: 14px 0; }
+  ul, ol { padding-left: 24px; }
+  li { margin: 5px 0; }
+  .small { font-size: 12.5px; color: #6b7c78; }
+  .kicker { color: #6b7c78; font-size: 13px; margin-top: -10px; }
+</style>
+</head>
+<body>
+
+<h1>中渔小助 · 营销自动化 Agent<br/>运营执行层与 API 接口说明</h1>
+<p class="kicker">版本 v0.4.0 ｜ 与 ZT-agent 构成「双 Agent 系统」｜ 本文档描述「从给建议到能办事」的能力升级</p>
+
+<h2>一、这次升级解决了什么问题</h2>
+<p>升级前，营销 Agent 的能力边界是<strong>「看懂 + 写出」</strong>：看经营数据、写营销文案。但它发现「速攻2号已经卖断货」时，只能提示你「尽快补货」，补货这个动作仍然要你自己去收银系统里点。</p>
+<p>升级后新增<strong>运营执行层（Action Layer）</strong>，把 AI 的一句话建议变成<strong>一张可审批、可执行、可追溯的工单</strong>，覆盖四类业务动作：补库存、订单发货、退货处理、取消订单。</p>
+
+<table>
+  <tr><th>能力</th><th>升级前</th><th>升级后</th></tr>
+  <tr><td>发现库存告急</td><td>提示「建议补货」</td><td>自动生成补货工单（含建议数量与成本估算），你点一下即完成补货</td></tr>
+  <tr><td>处理待发货订单</td><td>无法感知</td><td>自动生成发货工单，补录运单号后一键发货</td></tr>
+  <tr><td>售后处理</td><td>无法感知</td><td>从客户咨询里提取退换货线索，人工核实后发起退货工单</td></tr>
+  <tr><td>自动化程度</td><td>无</td><td>L0~L3 四档可调：前期每条都问你，后期成熟了自动跑</td></tr>
+</table>
+
+<h2>二、设计边界：为什么「能改数据」也不违规</h2>
+<div class="lead">
+<p><strong>一句话：营销 Agent 从不直接写业务数据库；要改数据，就请收银系统自己去改。</strong></p>
+</div>
+<p>原来的架构承诺是「只读 ZT-agent 的业务表」。加了执行能力后，这个承诺并没有被打破，而是被<strong>细化</strong>了：</p>
+
+<table>
+  <tr><th>诉求</th><th>做法</th><th>谁保障正确性</th></tr>
+  <tr><td><strong>看数据</strong>（销量 / 库存 / 订单 / 咨询）</td><td>直接只读 <code>agent_db</code>，由 <code>db.py</code> 的只读引擎守卫</td><td>本服务的只读守卫（任何写语句直接抛异常）</td></tr>
+  <tr><td><strong>改数据</strong>（补货 / 发货 / 售后）</td><td>以「后台操作员」身份调用 ZT-agent <strong>自己已有的</strong>管理接口（HTTP + JWT）</td><td><strong>ZT-agent 自己</strong>的事务与业务规则</td></tr>
+</table>
+
+<p>这样做带来三个好处：</p>
+<ol>
+  <li><strong>数据一致性有保障</strong> —— 库存扣减、订单状态机、钱包记账这些事务逻辑一份都不会被绕过，营销侧不可能写出脏数据；</li>
+  <li><strong>ZT-agent 零改动</strong> —— 它不需要为营销 Agent 加一行代码，仍然可以独立部署、独立运行；</li>
+  <li><strong>责任链完整</strong> —— 这一次操作在收银系统侧同样留下日志与流水，可追溯。</li>
+</ol>
+
+<h2>三、运营执行层的四层结构</h2>
+<table>
+  <tr><th>层</th><th>模块</th><th>职责</th></tr>
+  <tr><td>① 动作注册表</td><td><code>ActionSpec</code> / <code>ACTION_REGISTRY</code></td><td>声明系统能做哪些事、风险多大、需要哪些参数、是否允许自动化</td></tr>
+  <tr><td>② 护栏引擎</td><td><code>decide()</code></td><td>判定这一次该「自动执行」还是「等人点头」，并逐条记录判定理由</td></tr>
+  <tr><td>③ 任务状态机</td><td><code>OperationTask</code></td><td>待审批 → 已批准 → 已执行 / 执行失败 / 已驳回 / 已撤销</td></tr>
+  <tr><td>④ 审计日志</td><td><code>ActionAudit</code></td><td>谁、何时、依据什么、执行结果如何，全量留痕</td></tr>
+</table>
+<p class="small">另有执行器 <code>zt_client.py</code>：负责登录取 JWT、调用 ZT-agent 接口、解析响应并回写结果。</p>
+
+<h2>四、自主化分级（对应「前期问我，后期自己干」）</h2>
+<table>
+  <tr><th>等级</th><th>名称</th><th>行为</th><th>适用阶段</th></tr>
+  <tr><td><code>L0</code></td><td>仅建议</td><td>只生成待办，绝不执行 —— 纯参谋模式</td><td>刚上线、建立信任</td></tr>
+  <tr><td><code>L1</code></td><td>人工审批</td><td>每个动作都要人工点「批准」才执行（<strong>默认</strong>）</td><td>日常运营，最稳</td></tr>
+  <tr><td><code>L2</code></td><td>限额内自动</td><td>白名单动作在限额与配额内自动执行，超出自动转人工</td><td>流程稳定后</td></tr>
+  <tr><td><code>L3</code></td><td>白名单全自动</td><td>白名单动作只要过护栏就自动执行</td><td>成熟期</td></tr>
+</table>
+<div class="warn">
+<p><strong>一条铁律：只有「可逆 且 不涉及资金」的动作才允许自动化。</strong>这条规则写死在动作声明里，任何等级、任何配置都无法绕过。</p>
+</div>
+
+<h2>五、动作目录（系统能做哪些事）</h2>
+<table>
+  <tr><th>动作</th><th>编码</th><th>对象</th><th>风险</th><th>可逆</th><th>涉资金</th><th>能否自动</th><th>对应接口</th></tr>
+  <tr><td>📦 补充库存</td><td><code>restock</code></td><td>商品</td><td>中</td><td>是</td><td>否</td><td><strong>可进入自动评估</strong></td><td><code>PATCH /api/inventory/&lt;id&gt;/</code></td></tr>
+  <tr><td>🚚 订单发货</td><td><code>ship</code></td><td>订单</td><td>中</td><td>否</td><td>否</td><td>必须人工</td><td><code>POST /api/orders/&lt;no&gt;/ship/</code></td></tr>
+  <tr><td>↩️ 退货处理</td><td><code>return</code></td><td>订单</td><td>高</td><td>否</td><td>是</td><td>必须人工</td><td><code>POST /api/orders/&lt;no&gt;/return/</code></td></tr>
+  <tr><td>🚫 取消订单</td><td><code>cancel</code></td><td>订单</td><td>高</td><td>否</td><td>否</td><td>必须人工</td><td><code>POST /api/orders/&lt;no&gt;/cancel/</code></td></tr>
+</table>
+<p class="small">补库存之所以可以自动化，是因为库存可再次调整（可逆），且限额可控制其金额敞口。</p>
+
+<h2>六、七道护栏（逐条判定，全部通过才允许自动执行）</h2>
+<table>
+  <tr><th>序</th><th>护栏</th><th>规则</th></tr>
+  <tr><td>1</td><td>急停开关</td><td>开启后一切转人工（最高优先级）</td></tr>
+  <tr><td>2</td><td>自主等级</td><td>L0 只建议，不执行</td></tr>
+  <tr><td>3</td><td>动作性质</td><td>不可逆或涉资金 → 永久人工</td></tr>
+  <tr><td>4</td><td>动作白名单</td><td>不在名单内转人工</td></tr>
+  <tr><td>5</td><td>等级策略</td><td>L1 一律人工</td></tr>
+  <tr><td>6</td><td>目标白名单</td><td>限定试点范围（空 = 不限制）</td></tr>
+  <tr><td>7</td><td>限额 + 每日配额</td><td>超量或超次数转人工</td></tr>
+</table>
+<p>每条判定都连同「通过 / 拦截 + 原因」一起落库，前端原样展示 —— 让「AI 为什么没敢自己动手」完全可解释，而不是一个黑箱。</p>
+
+<h2>七、安全机制</h2>
+<table>
+  <tr><th>机制</th><th>说明</th></tr>
+  <tr><td>幂等键</td><td>只取业务标识字段（如 <code>product_id + adjust</code>、<code>order_no</code>），<strong>不含备注文本</strong>，避免「换个备注就绕过防重复」</td></tr>
+  <tr><td>在途去重</td><td>同一动作 + 同一目标若已有「待审批 / 已批准」任务，不重复建单</td></tr>
+  <tr><td>重复执行拦截</td><td>同一动作 + 同一目标在 10 分钟内被重复执行 → 判定误双击并拦截（时间窗设计，不阻挡合法的重复业务）</td></tr>
+  <tr><td>全量审计</td><td>创建 / 批准 / 驳回 / 执行 / 失败 / 改策略全部留痕，可追责</td></tr>
+  <tr><td>演练模式</td><td><code>dry_run</code> 只生成「将要发起的请求」不落地，适合演练与演示</td></tr>
+  <tr><td>最小权限账号</td><td>建议在 ZT-agent 后台为营销 Agent <strong>单独建一个 staff 机器人账号</strong>，可随时停用，且审计日志能区分「人操作」与「Agent 操作」</td></tr>
+</table>
+
+<h2>八、API 接口清单（完整）</h2>
+
+<h3>8.1 系统</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/health</code></td><td>服务健康检查</td></tr>
+</table>
+
+<h3>8.2 经营分析（只读收银系统数据）</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/analytics/health-db</code></td><td>数据库连通性自检</td></tr>
+  <tr><td>GET</td><td><code>/api/analytics/overview</code></td><td>经营概览（订单 / 营业额 / 钱包 / 待发货 / 库存预警数）</td></tr>
+  <tr><td>GET</td><td><code>/api/analytics/diagnosis</code></td><td><strong>经营诊断</strong>：真实指标聚合 + 大模型生成「说人话」的行动建议</td></tr>
+  <tr><td>GET</td><td><code>/api/analytics/sales-top</code></td><td>销量排行 Top N</td></tr>
+  <tr><td>GET</td><td><code>/api/analytics/low-stock</code></td><td>库存预警</td></tr>
+  <tr><td>GET</td><td><code>/api/analytics/hot-questions</code></td><td>客户咨询热点挖掘</td></tr>
+</table>
+
+<h3>8.3 营销文案</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/marketing/llm-status</code></td><td>大模型配置状态</td></tr>
+  <tr><td>POST</td><td><code>/api/marketing/generate</code></td><td>生成文案（Agent 自主查数据）→ 存为待审核草稿，返回数据依据</td></tr>
+  <tr><td>GET</td><td><code>/api/marketing/drafts</code></td><td>草稿列表（可按状态筛选）</td></tr>
+  <tr><td>POST</td><td><code>/api/marketing/drafts/{id}/review</code></td><td>人工审核（已通过 / 已驳回）</td></tr>
+  <tr><td>DELETE</td><td><code>/api/marketing/drafts/{id}</code></td><td>删除草稿</td></tr>
+  <tr><td>GET</td><td><code>/api/marketing/stats</code></td><td>草稿状态统计</td></tr>
+</table>
+
+<h3>8.4 运营执行层（本轮新增）</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/operations/actions</code></td><td>动作目录（能做哪些事、风险等级、参数、是否允许自动化）</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/policy</code></td><td>读取自主化策略（等级 / 限额 / 配额 / 白名单 / 执行模式）</td></tr>
+  <tr><td>PUT</td><td><code>/api/operations/policy</code></td><td>修改策略</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/kill-switch</code></td><td><strong>急停开关</strong>：一键暂停全部自动执行</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/zt-status</code></td><td>收银系统连通性 + 凭据状态 + 当前执行模式</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/scan-preview</code></td><td>巡检预览（只读，不建任务）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/scan</code></td><td><strong>智能巡检</strong>：扫库存 / 订单 / 咨询 → 生成待办</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/tasks</code></td><td>任务列表（按状态 / 动作筛选）</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/tasks/{id}</code></td><td>任务详情（含护栏逐条判定 + 审计轨迹）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/tasks</code></td><td>手工创建任务</td></tr>
+  <tr><td>PATCH</td><td><code>/api/operations/tasks/{id}</code></td><td>待审批阶段补充参数（如发货填运单号）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/tasks/{id}/approve</code></td><td><strong>批准</strong>（可同时执行）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/tasks/{id}/reject</code></td><td>驳回</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/tasks/{id}/cancel</code></td><td>撤销</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/tasks/{id}/execute</code></td><td>执行已批准任务</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/audit</code></td><td>审计日志（谁、何时、做了什么）</td></tr>
+  <tr><td>GET</td><td><code>/api/operations/stats</code></td><td>任务状态统计 + 今日自动执行次数</td></tr>
+</table>
+<p class="small">在线交互式文档（Swagger UI）：<code>http://127.0.0.1:8010/docs</code>；OpenAPI 规范：<code>/openapi.json</code>。</p>
+
+<h2>九、端到端验证结果（均为真实调用实测）</h2>
+<table>
+  <tr><th>用例</th><th>结果</th></tr>
+  <tr><td>巡检生成待办</td><td>✅ 扫出 3 个库存预警商品 → 生成 3 条补货待办（L1 下全部转人工）</td></tr>
+  <tr><td><strong>真实补货执行</strong></td><td>✅ 批准后经收银系统接口成功补货，其侧真实库存 0 → 5，复查一致（随后原路退回，净变化为零）</td></tr>
+  <tr><td>真实错误处理</td><td>✅ 对不存在订单发起发货 → 收银系统返回「订单不存在」，任务标记执行失败，<strong>不产生任何数据变更</strong></td></tr>
+  <tr><td>高风险护栏</td><td>✅ 把等级调到最宽松的 L3，发货仍被判为「必须人工审批」</td></tr>
+  <tr><td>急停护栏</td><td>✅ 开启急停后，连可自动化的补货也转为待审批</td></tr>
+  <tr><td>限额护栏</td><td>✅ L2 下补货 33 件 &gt; 上限 20 件 → 自动转人工</td></tr>
+  <tr><td>幂等（在途去重）</td><td>✅ 同商品同数量、仅备注不同，命中同一张在途单</td></tr>
+  <tr><td>幂等（重复执行）</td><td>✅ 10 分钟内重复执行被拦截，库存未再变化</td></tr>
+  <tr><td>审计留痕</td><td>✅ 创建 / 批准 / 执行 / 失败 / 改策略全部入库可查</td></tr>
+</table>
+
+<h2>十、演进路线：从「每条都问你」到「成熟了自己干」</h2>
+<table>
+  <tr><th>阶段</th><th>配置</th><th>人的角色</th></tr>
+  <tr><td>起步期</td><td>L1 人工审批 + 演练模式先跑几轮</td><td>逐条审批，建立对 AI 判断的信任</td></tr>
+  <tr><td>试点期</td><td>L2 + 目标白名单（只放开 1~2 个商品）+ 小限额</td><td>只在超限时才介入</td></tr>
+  <tr><td>成熟期</td><td>L2 放宽限额，或升到 L3</td><td>看日报、处理异常，日常不介入</td></tr>
+  <tr><td>任何时候</td><td>急停开关</td><td>一句话全部转人工</td></tr>
+</table>
+<div class="ok">
+<p><strong>面试叙事建议：</strong>这套设计能同时体现三种能力 ——
+① <strong>业务理解</strong>（知道哪些动作可自动化、哪些必须人工）；
+② <strong>风险意识</strong>（幂等、限额、配额、急停、审计、演练模式）；
+③ <strong>架构功底</strong>（跨服务不改对方代码、通过既有接口与事务边界协作）。
+</p>
+</div>
+
+</body>
+</html>

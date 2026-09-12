@@ -3,7 +3,9 @@
 ─────────────────────────────────────────
 设计原则（与 ZT-agent 解耦）：
   · 只读连接 ZT-agent 的 agent_db，业务表一行不写（db.py 内置只读守卫）；
-  · 自身新增表（marketing_drafts）才允许写入；
+  · 自身新增表（marketing_drafts / operation_tasks / ...）才允许写入；
+  · 需要改动业务数据时（补货/发货/售后），以「后台操作员」身份调用
+    ZT-agent 自己的管理接口（zt_client.py），由对方保障业务规则与事务；
   · 大模型能力由 LangChain 接入（marketing_agent.py）。
 """
 from contextlib import asynccontextmanager
@@ -11,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import analytics, marketing
+from routers import analytics, marketing, operations
 
 
 @asynccontextmanager
@@ -24,15 +26,25 @@ async def lifespan(app: FastAPI):
         print("[startup] 自管表 marketing_drafts 就绪")
     except Exception as e:  # 数据库暂不可用时不阻塞服务启动
         print(f"[warn] 自管表初始化跳过：{type(e).__name__}: {e}")
+    try:
+        from operations import init_operation_tables
+
+        init_operation_tables()
+        print("[startup] 运营执行层自管表就绪（operation_tasks / action_audit_log / autonomy_settings）")
+    except Exception as e:
+        print(f"[warn] 运营执行层建表跳过：{type(e).__name__}: {e}")
     yield
 
 
 app = FastAPI(
     title="中渔小助 · 营销自动化 Agent",
-    version="0.3.0",
+    version="0.4.0",
     description=(
-        "面向 B 端的营销自动化服务：只读消费 ZT-agent 的业务数据，"
-        "由 LangChain 编排生成营销文案，经人工审核后发布。"
+        "面向 B 端的营销自动化服务：\n\n"
+        "· **只读消费** ZT-agent 的业务数据（库存/订单/咨询/知识库）；\n"
+        "· 由 LangChain 编排生成营销文案，经人工审核后发布；\n"
+        "· **运营执行层**：把 AI 建议变成可审批、可执行、可追溯的工单，"
+        "支持补货 / 发货 / 售后等动作的自主化分级（L0~L3）与护栏管控。"
     ),
     lifespan=lifespan,
 )
@@ -53,6 +65,7 @@ app.add_middleware(
 
 app.include_router(analytics.router)
 app.include_router(marketing.router)
+app.include_router(operations.router)
 
 
 @app.get("/api/health", tags=["系统"])

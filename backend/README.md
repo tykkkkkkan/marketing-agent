@@ -12,14 +12,30 @@ backend/
 ├── models_readonly.py      ZT-agent 业务表只读 ORM 映射
 ├── marketing_tools.py      LangChain 工具（4 个，全部只读）
 ├── marketing_agent.py      LangChain 编排（1.x create_agent + DeepSeek）
-├── drafts.py               自管表 marketing_drafts（本服务唯一允许写的表）
+├── drafts.py               自管表 marketing_drafts（文案草稿）
+├── operations.py           运营执行层：动作注册表 + 护栏引擎 + 任务状态机 + 审计
+├── zt_client.py            执行器：以「后台操作员」身份调用 ZT-agent 管理接口（HTTP + JWT）
 ├── routers/
-│   ├── analytics.py        经营分析接口（销量/库存/概览/咨询热点）
-│   └── marketing.py        文案生成 + 草稿审核闭环接口
+│   ├── analytics.py        经营分析接口（销量/库存/概览/咨询热点/经营诊断）
+│   ├── marketing.py        文案生成 + 草稿审核闭环接口
+│   └── operations.py       运营任务接口（巡检/审批/执行/策略/急停/审计）
 ├── requirements.txt        实际锁定版本（见文件头注释）
 ├── Dockerfile
 └── .env.example
 ```
+
+## 运行为什么需要 ZT-agent 也起着
+
+营销 Agent 对业务数据分两种处理，边界很清楚：
+
+| 诉求 | 做法 | 谁保障正确性 |
+|---|---|---|
+| **看数据**（销量/库存/订单/咨询） | 直接只读 `agent_db` | 本服务的只读守卫 |
+| **改数据**（补货/发货/售后） | 调用 ZT-agent 已有的管理接口（HTTP + JWT） | **ZT-agent 自己**的事务与业务规则 |
+
+第二条是关键：营销侧不去写 `inventory.stock`，而是请 ZT-agent 去写 —— 库存扣减、订单状态机、
+钱包记账这些事务逻辑一份都不会被绕过，ZT-agent 也不用为营销 Agent 改任何代码。
+ZT-agent 没起时，只有「执行」能力不可用，看板、文案等功能不受影响。
 
 ## 「只读」是如何落地的（面试可讲）
 
@@ -28,7 +44,11 @@ backend/
 `PermissionError`。也就是说「营销侧只读业务表」**不是口头约定，而是运行时可验证的硬约束** ——
 将来万一手滑写了写操作，会在测试阶段就暴露，而不是悄悄污染 ZT-agent 的数据。
 
-写入走另一条 `write_engine`，且只被 `drafts.py`（自管表）使用。
+写入走另一条 `write_engine`，且只被自管表使用（`marketing_drafts` / `operation_tasks` /
+`action_audit_log` / `autonomy_settings`）。
+
+配置加载顺序（`db.py` 与 `zt_client.py` 保持一致）：
+`backend/.env → marketing-agent/.env → ZT-agent/.env`，都缺失时才落到代码内置默认值。
 
 ## 依赖与启动
 
@@ -37,7 +57,9 @@ backend/
 ## 快速自检
 
 ```bash
-curl http://127.0.0.1:8010/api/analytics/health-db    # 数据库连通性
-curl http://127.0.0.1:8010/api/marketing/llm-status   # 大模型就绪状态
-curl http://127.0.0.1:8010/api/marketing/stats        # 草稿状态统计
+curl http://127.0.0.1:8010/api/analytics/health-db      # 数据库连通性
+curl http://127.0.0.1:8010/api/marketing/llm-status     # 大模型就绪状态
+curl http://127.0.0.1:8010/api/marketing/stats          # 草稿状态统计
+curl http://127.0.0.1:8010/api/operations/zt-status     # 收银系统连通性 + 凭据 + 执行模式
+curl http://127.0.0.1:8010/api/operations/tasks         # 运营待办列表
 ```

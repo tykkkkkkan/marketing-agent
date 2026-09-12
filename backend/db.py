@@ -21,9 +21,12 @@ from sqlalchemy.orm import sessionmaker
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# 依次尝试加载：本服务 .env → ZT-agent .env（共享同一份 DB 凭据）
+# 依次尝试加载（后加载的不会覆盖已有的，override=False）：
+#   backend/.env（后端目录）→ marketing-agent/.env（项目根，docker compose 读这份）
+#   → ZT-agent/.env（共享同一份 DB 凭据）
 _ENV_CANDIDATES = [
     BASE_DIR / ".env",
+    BASE_DIR.parent / ".env",
     BASE_DIR.parent.parent / "ZT-agent" / ".env",
 ]
 for _p in _ENV_CANDIDATES:
