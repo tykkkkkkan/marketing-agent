@@ -211,6 +211,15 @@
 </table>
 <p class="small">在线交互式文档（Swagger UI）：<code>http://127.0.0.1:8010/docs</code>；OpenAPI 规范：<code>/openapi.json</code>。</p>
 
+<h3>9.6 跨 Agent 协调（L5 多智能体编排，本轮新增）</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/operations/coordination/events</code></td><td>协调事件列表（断货暂停 / 退货复盘 / 收银系统入站退货）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/coordination/inbound</code></td><td><strong>接收收银系统发来的事件</strong>（如退货申请），登记为协调记录；支持 <code>X-Coord-Token</code> 共享密钥校验</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/coordination/{id}/apply</code></td><td>人工确认一条待确认事件（断货类立即下发收银系统生效）</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/coordination/scan</code></td><td>立即执行一轮协调巡检（不等自动运营定时器）</td></tr>
+</table>
+
 <h2>十、端到端验证结果（均为真实调用实测）</h2>
 <table>
   <tr><th>用例</th><th>结果</th></tr>
@@ -229,9 +238,42 @@
   <tr><td>护栏不被绕过</td><td>✅ 同一轮里，白名单外的商品仍只生成待审批任务，不自动执行</td></tr>
   <tr><td>急停对自动运营同样生效</td><td>✅ 急停开启后跑一轮：<strong>只建单、零自动执行</strong>，目标商品库存未发生任何变化</td></tr>
   <tr><td>不留测试残留</td><td>✅ 验证后全部 6 个商品的库存 / 预留量 / 预警线与订单状态与验证前<strong>逐字段一致</strong></td></tr>
+  <tr><td><strong>断货自动联动（Flow A）</strong></td><td>✅ 商品库存 0 → 巡检捕获 → 自动发 <code>pause_product</code> → 收银系统库存接口返回 <code>purchase_paused:true</code> + 客户提示文案（覆盖表生效，业务表零改动）</td></tr>
+  <tr><td>待确认转人工</td><td>✅ <code>coord_auto_apply=off</code> 时断货只生成待确认事件，人工点「确认下发」后才发往收银系统并生效</td></tr>
+  <tr><td>入站事件与白名单</td><td>✅ 收到 <code>return_requested</code> → 登记协调事件；未知事件 → 400 拒绝</td></tr>
+  <tr><td>协调幂等去重</td><td>✅ 同一断货商品在事件未处理前重复巡检不会重复下发</td></tr>
+  <tr><td>并入自动运营</td><td>✅ 整轮自动运营的返回体与运行记录均含协调巡检摘要</td></tr>
 </table>
 
-<h2>十一、演进路线：从「每条都问你」到「成熟了自己干」</h2>
+<h2>十一、L5 多智能体编排 ——「两个 AI 助手会互相打招呼」（本轮新增）</h2>
+<p>这是整套系统的最高层能力：营销 Agent 作为<strong>协调中枢</strong>，与收银系统侧的 C 端客服 Agent 双向协同。
+到此，AI 能力路线 L1 意图识别 → L2 知识检索 → L3 工具调用 → L4 多轮记忆全部补齐，进入 <strong>L5 多智能体协同与编排</strong>。</p>
+<table>
+  <tr><th>流向</th><th>触发</th><th>动作</th></tr>
+  <tr><td>营销 → 前台（Flow A）</td><td>巡检发现商品<strong>断货</strong>（可用库存 ≤ 0）</td><td>向客服 Agent 发 <code>pause_product</code>：前台暂停该商品购买，并挂出「暂时缺货，可先收藏或咨询客服」提示</td></tr>
+  <tr><td>营销内部（Flow B）</td><td>巡检发现商品<strong>退货率飙升</strong>（≥ 阈值且样本 ≥ 3 单）</td><td>生成复盘事件，提示复盘该商品的质量 / 描述 / 售后策略</td></tr>
+  <tr><td>前台 → 营销</td><td>客服 Agent 主动发来 <code>return_requested</code></td><td>登记退货告知事件，供运营跟进</td></tr>
+</table>
+<h3>11.1 零侵入怎么做到的</h3>
+<ul>
+  <li>营销侧<strong>只读</strong>收银系统业务表发现信号；下发协调指令只走对方新增的接收钩子 <code>POST /api/coordination/inbound/</code>（staff 鉴权 + <strong>事件白名单</strong>）；</li>
+  <li>对方协调状态放在<strong>新建托管表 <code>product_coordination</code></strong>（覆盖表模式），业务表一列不改、一行不迁；库存接口只读覆盖表做展示合并；</li>
+  <li>每一次协调都落本服务 <code>coordination_events</code> 表，谁、何时、为什么、结果如何全量可溯。</li>
+</ul>
+<h3>11.2 开关与节奏（页面「自主化设置」可改）</h3>
+<table>
+  <tr><th>策略项</th><th>默认</th><th>说明</th></tr>
+  <tr><td><code>coord_enabled</code></td><td><code>off</code></td><td>跨 Agent 协调总开关，<strong>默认关闭</strong>；关掉即整体停用</td></tr>
+  <tr><td><code>coord_auto_apply</code></td><td><code>off</code></td><td><code>off</code>=只建议（转人工确认）；<code>on</code>=发现即自动下发生效</td></tr>
+  <tr><td><code>coord_return_surge_threshold</code></td><td><code>20</code></td><td>退货率告警阈值（%）</td></tr>
+</table>
+<div class="ok">
+<p><strong>L5 的三条安全底线：</strong>① 事件白名单 —— 对方只接受三种协调指令，其余一律拒绝；
+② 默认转人工 —— 断货暂停虽可自动，但默认只生成建议，人点头才下发；
+③ 全链路留痕 —— 每条协调事件可查「谁发现、为什么、何时下发、结果如何」，随时可整体关停。</p>
+</div>
+
+<h2>十二、演进路线：从「每条都问你」到「成熟了自己干」</h2>
 <table>
   <tr><th>阶段</th><th>配置</th><th>人的角色</th></tr>
   <tr><td>起步期</td><td>L1 人工审批 + 演练模式先跑几轮；<strong>自动运营保持关闭</strong></td><td>逐条审批，建立对 AI 判断的信任</td></tr>
@@ -240,11 +282,12 @@
   <tr><td>任何时候</td><td>急停开关 / <code>AUTOPILOT_DISABLED=1</code></td><td>一句话全部转人工</td></tr>
 </table>
 <div class="ok">
-<p><strong>面试叙事建议：</strong>这套设计能同时体现四种能力 ——
+<p><strong>面试叙事建议：</strong>这套设计能同时体现五种能力 ——
 ① <strong>业务理解</strong>（知道哪些动作可自动化、哪些必须人工）；
 ② <strong>风险意识</strong>（幂等、限额、配额、急停、审计、演练模式）；
 ③ <strong>架构功底</strong>（跨服务不改对方代码、通过既有接口与事务边界协作）；
-④ <strong>工程闭环意识</strong>（无人值守不是「放开限制」，而是默认关闭 + 复用同一套护栏 + 全程可观测可复盘）。
+④ <strong>工程闭环意识</strong>（无人值守不是「放开限制」，而是默认关闭 + 复用同一套护栏 + 全程可观测可复盘）；
+⑤ <strong>多智能体编排能力</strong>（L5：协调中枢 + 事件白名单 + 覆盖表零侵入 + 默认转人工，两个 Agent 各自独立运行、按需协同）。
 </p>
 </div>
 
