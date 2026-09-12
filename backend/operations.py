@@ -252,8 +252,12 @@ POLICY_DEFAULTS: dict[str, str] = {
     "global_level": "L1",            # L0 / L1 / L2 / L3
     "kill_switch": "off",            # off / on  —— 急停：开启后所有动作转人工
     "execute_mode": "live",          # live / dry_run —— 真实执行 / 演练
-    "auto_actions": "restock",       # 允许进入自动评估的动作（逗号分隔）
+    "auto_actions": "restock",       # 允许进入自动评估的动作（逗号分隔，取值=动作注册表 code）
     "auto_target_whitelist": "",     # 目标白名单（商品ID或订单号，逗号分隔；空=不限制）
+    # ── 数据库写入权限（写动作依然全部经 ZT-agent 接口，绝不直连业务表）──
+    # readonly=只读（全部写动作转人工）/ inventory=开放库存写 / inventory+orders=库存+订单写
+    "db_write_scope": "readonly",
+    "default_ship_company": "",      # 自动发货时使用的默认快递公司（留空=中通快递）
     "auto_restock_max_qty": "20",    # L2：单次自动补货数量上限
     "auto_restock_max_amount": "500",  # L2：单次自动补货金额上限（元）
     "daily_auto_quota": "10",        # 每日自动执行次数上限（所有等级生效）
@@ -272,6 +276,8 @@ POLICY_LABELS = {
     "execute_mode": "执行模式",
     "auto_actions": "允许自动执行的动作",
     "auto_target_whitelist": "目标白名单",
+    "db_write_scope": "数据库写入权限",
+    "default_ship_company": "默认快递公司",
     "auto_restock_max_qty": "单次自动补货上限(件)",
     "auto_restock_max_amount": "单次自动补货上限(元)",
     "daily_auto_quota": "每日自动执行配额(次)",
@@ -297,6 +303,11 @@ def get_policy(db) -> dict:
         policy["kill_switch"] = "off"
     if policy["execute_mode"] not in ("live", "dry_run"):
         policy["execute_mode"] = "live"
+    if policy["db_write_scope"] not in ("readonly", "inventory", "inventory+orders"):
+        policy["db_write_scope"] = "readonly"
+    # 动作白名单归一化：只保留注册表里真实存在的 code，去重、去空白
+    _known = [a.strip() for a in (policy["auto_actions"] or "").split(",") if a.strip()]
+    policy["auto_actions"] = ",".join(dict.fromkeys(a for a in _known if a in ACTION_REGISTRY))
     return policy
 
 
@@ -377,12 +388,30 @@ def decide(spec: ActionSpec, payload: dict, quantity: int, amount: float,
                else f"当前 {level} {AUTONOMY_LEVELS[level][0]}"):
         return Decision(False, level, "L0 仅建议模式，需人工执行", checks)
 
-    # 3) 动作本身是否允许自动化（不可逆 / 涉资金 → 永久人工）
-    if not chk("动作可自动化", spec.auto_eligible,
-               "可逆且不涉资金的动作为可自动化" if spec.auto_eligible
-               else f"「{spec.name}」{'不可逆' if not spec.reversible else ''}"
-                    f"{'且' if not spec.reversible and spec.involves_money else ''}"
-                    f"{'涉及资金' if spec.involves_money else ''}，任何等级下都必须人工审批"):
+    # 3) 数据库写入权限 + 动作性质
+    #    · 涉资金且不可逆（退货）→ 永久人工，任何权限/等级都放不开
+    #    · 权限=只读 → 所有写动作转人工（等价于整体只出建议）
+    #    · 订单类动作（发货/取消）需权限显式包含 orders；开放后原「永久人工」动作可进入自动评估
+    #    写入通道不变：全部经 ZT-agent 接口执行，本权限只控制「自动执行允许碰哪类数据」
+    scope = policy.get("db_write_scope") or "readonly"
+    if not spec.auto_eligible and spec.involves_money:
+        if not chk("动作可自动化", False,
+                   f"「{spec.name}」涉及资金流出，任何权限与等级下都必须人工审批"):
+            return Decision(False, level, "动作性质要求人工审批", checks)
+    scope_ok = scope != "readonly" and (spec.target_type != "order" or "orders" in scope)
+    if not chk("数据库写入权限", scope_ok,
+               ("权限=只读：所有写动作转人工" if scope == "readonly"
+                else f"权限仅开放库存写入：「{spec.name}」属订单类动作，转人工")
+               if not scope_ok else
+               (f"已开放订单写入：「{spec.name}」允许进入自动评估（运单号自动生成）"
+                if not spec.auto_eligible
+                else f"已开放{'库存+订单' if 'orders' in scope else '库存'}写入权限")):
+        return Decision(False, level,
+                        "只读权限，需人工执行" if scope == "readonly"
+                        else "未开放订单写入权限，需人工执行", checks)
+    if not chk("动作可自动化", True,
+               f"「{spec.name}」原设计为人工审批，已通过订单写入权限显式放开"
+               if not spec.auto_eligible else "可逆且不涉资金的动作为可自动化"):
         return Decision(False, level, "动作性质要求人工审批", checks)
 
     # 4) 动作白名单
@@ -691,6 +720,14 @@ def execute_task(db, task: OperationTask, actor: str, auto: bool = False) -> Ope
         return task
 
     payload = _payload_of(task)
+    # 发货任务自动补全：默认快递公司取策略项，运单号按 AUTO+时间戳生成
+    # （自动执行的任务单不会有人工填单环节，缺这两项会被必填校验拦死）
+    if spec.code == "ship":
+        _pol = get_policy(db)
+        if not str(payload.get("ship_company") or "").strip():
+            payload["ship_company"] = (_pol.get("default_ship_company") or "").strip() or "中通快递"
+        if not str(payload.get("tracking_no") or "").strip():
+            payload["tracking_no"] = "AUTO" + datetime.now().strftime("%Y%m%d%H%M%S")
     bad = _validate_payload(spec, payload)
     if bad:
         task.status = STATUS_FAILED
@@ -730,8 +767,11 @@ def execute_task(db, task: OperationTask, actor: str, auto: bool = False) -> Ope
     if auto:
         task.auto_executed = True
     db.commit()
+    # 发货动作把实际使用的快递公司/运单号写进审计，保证「自动发什么单」可追溯
+    _extra = (f"（快递公司={payload.get('ship_company')}，运单号={payload.get('tracking_no')}）"
+              if spec.code == "ship" else "")
     _audit(db, task.id, task.action_code, "executed" if ok else "failed", actor,
-           f"[{task.exec_mode}] {task.exec_message}")
+           f"[{task.exec_mode}] {task.exec_message}{_extra}")
     db.commit()
     return task
 

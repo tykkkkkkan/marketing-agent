@@ -116,7 +116,7 @@ export default function Operations() {
       })
       return {
         message: on
-          ? `自动运营已开启：每 ${policy.autopilot_interval_minutes || 30} 分钟自动巡检一轮；发货/退货等仍会转人工审批`
+          ? `自动运营已开启：每 ${policy.autopilot_interval_minutes || 30} 分钟自动巡检一轮；能自动做什么由「数据库写入权限」与动作白名单决定（退货永远转人工）`
           : '自动运营已关闭，系统不再自行巡检',
         ...res,
       }
@@ -231,8 +231,23 @@ export default function Operations() {
       {showSettings && (
         <div className="panel">
           <h3>自主化设置（决定 AI 什么时候可以自己动手）</h3>
-          <p className="panel-sub">哪怕调到最宽松，只要动作「不可逆」或「涉及资金」（发货、退货、取消），也必须人工审批。</p>
+          <p className="panel-sub">
+            写入权限=只读时，所有写动作一律转人工；开放权限后，补货 / 发货 / 取消可在护栏（等级 + 限额 + 配额 + 白名单）内自动执行，
+            发货运单号自动生成。退货涉及资金流出，任何配置下都永远人工审批。所有写入均经 ZT-agent 接口，不直接碰数据库。
+          </p>
           <div className="settings-grid">
+            <label>
+              数据库写入权限
+              <select
+                value={policy.db_write_scope || 'readonly'}
+                onChange={(e) => savePolicy({ db_write_scope: e.target.value })}
+              >
+                <option value="readonly">只读（所有写动作转人工）</option>
+                <option value="inventory">开放库存写（补货可自动）</option>
+                <option value="inventory+orders">开放库存+订单写（发货/取消可自动）</option>
+              </select>
+              <span className="tip">控制自动执行允许改哪类数据；权限不开放时，勾了白名单也不会自动执行。</span>
+            </label>
             <label>
               自主等级
               <select
@@ -258,36 +273,70 @@ export default function Operations() {
               </select>
               <span className="tip">建议先演练确认流程，再切到真实执行。</span>
             </label>
+            <label style={{ gridColumn: '1 / -1' }}>
+              允许自动执行的动作（多选）
+              <div className="chk-row">
+                {(actions.length ? actions : [
+                  { code: 'restock', name: '补充库存', icon: '📦', auto_eligible: true },
+                  { code: 'ship', name: '订单发货', icon: '🚚', auto_eligible: false },
+                  { code: 'return', name: '退货处理', icon: '↩️', auto_eligible: false },
+                  { code: 'cancel', name: '取消订单', icon: '🚫', auto_eligible: false },
+                ]).map((a) => {
+                  const cur = (policy.auto_actions || '').split(',').map((s) => s.trim()).filter(Boolean)
+                  const on = cur.includes(a.code)
+                  return (
+                    <label key={a.code} className={`chk${on ? ' on' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? Array.from(new Set([...cur, a.code]))
+                            : cur.filter((c) => c !== a.code)
+                          savePolicy({ auto_actions: next.join(',') })
+                        }}
+                      />
+                      {a.icon} {a.name}
+                      {!a.auto_eligible && <span className="small muted">（需开放对应写入权限）</span>}
+                    </label>
+                  )
+                })}
+              </div>
+              <span className="tip">勾选 = 允许进入自动评估；实际能否自动执行还取决于写入权限、自主等级与限额配额。退货处理永远转人工。</span>
+            </label>
             <label>
-              允许自动执行的动作
+              默认快递公司（自动发货用）
               <input
-                defaultValue={policy.auto_actions || ''}
-                onBlur={(e) => savePolicy({ auto_actions: e.target.value })}
-                placeholder="restock, ship ..."
+                defaultValue={policy.default_ship_company || ''}
+                onBlur={(e) => savePolicy({ default_ship_company: e.target.value })}
+                placeholder="留空 = 中通快递"
               />
-              <span className="tip">多个用英文逗号分隔；不在名单里的动作一律转人工。</span>
+              <span className="tip">自动执行发货时填入；运单号按「AUTO+时间戳」自动生成。</span>
             </label>
             <label>
               单次自动补货上限（件）
-              <input
-                defaultValue={policy.auto_restock_max_qty || ''}
-                onBlur={(e) => savePolicy({ auto_restock_max_qty: e.target.value })}
+              <NumSelect
+                value={policy.auto_restock_max_qty}
+                options={['5', '10', '20', '50', '100']}
+                onChange={(v) => savePolicy({ auto_restock_max_qty: v })}
               />
               <span className="tip">L2 限额内自动时生效；超过就转人工。</span>
             </label>
             <label>
               单次自动补货上限（元）
-              <input
-                defaultValue={policy.auto_restock_max_amount || ''}
-                onBlur={(e) => savePolicy({ auto_restock_max_amount: e.target.value })}
+              <NumSelect
+                value={policy.auto_restock_max_amount}
+                options={['100', '300', '500', '1000', '2000']}
+                onChange={(v) => savePolicy({ auto_restock_max_amount: v })}
               />
               <span className="tip">按进货成本估算，控制一次自动花的钱。</span>
             </label>
             <label>
               每日自动执行配额（次）
-              <input
-                defaultValue={policy.daily_auto_quota || ''}
-                onBlur={(e) => savePolicy({ daily_auto_quota: e.target.value })}
+              <NumSelect
+                value={policy.daily_auto_quota}
+                options={['5', '10', '20', '50', '100']}
+                onChange={(v) => savePolicy({ daily_auto_quota: v })}
               />
               <span className="tip">一天的自动执行上限，到顶后全部转人工。</span>
             </label>
@@ -313,9 +362,10 @@ export default function Operations() {
             </label>
             <label>
               自动巡检间隔（分钟）
-              <input
-                defaultValue={policy.autopilot_interval_minutes || ''}
-                onBlur={(e) => savePolicy({ autopilot_interval_minutes: e.target.value })}
+              <NumSelect
+                value={policy.autopilot_interval_minutes}
+                options={['15', '30', '60', '120', '240']}
+                onChange={(v) => savePolicy({ autopilot_interval_minutes: v })}
               />
               <span className="tip">建议 30~120 分钟；太频繁没有意义，数据变化没那么快。</span>
             </label>
@@ -343,9 +393,10 @@ export default function Operations() {
             </label>
             <label>
               退货率告警阈值（%）
-              <input
-                defaultValue={policy.coord_return_surge_threshold || ''}
-                onBlur={(e) => savePolicy({ coord_return_surge_threshold: e.target.value })}
+              <NumSelect
+                value={policy.coord_return_surge_threshold}
+                options={['5', '10', '20', '30', '50']}
+                onChange={(v) => savePolicy({ coord_return_surge_threshold: v })}
               />
               <span className="tip">某商品退货率超过该值即标记「需复盘」；样本不足 3 单不触发。</span>
             </label>
@@ -741,5 +792,18 @@ function CoordPanel({ busy, run, enabled }) {
         </p>
       )}
     </div>
+  )
+}
+
+/* 数字类策略的下拉选择：当前值不在候选里时自动补进选项，避免显示错位 */
+function NumSelect({ value, options, onChange }) {
+  const v = String(value ?? '')
+  const opts = v && !options.includes(v) ? [v, ...options] : options
+  return (
+    <select value={v} onChange={(e) => onChange(e.target.value)}>
+      {opts.map((o) => (
+        <option key={o} value={o}>{o}</option>
+      ))}
+    </select>
   )
 }

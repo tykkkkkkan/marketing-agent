@@ -61,6 +61,8 @@ class PolicyUpdate(BaseModel):
     execute_mode: str | None = Field(None, description="live 真实执行 / dry_run 演练")
     auto_actions: str | None = Field(None, description="允许自动执行的动作，逗号分隔")
     auto_target_whitelist: str | None = Field(None, description="目标白名单，逗号分隔；空=不限制")
+    db_write_scope: str | None = Field(None, description="数据库写入权限：readonly / inventory / inventory+orders")
+    default_ship_company: str | None = Field(None, description="自动发货默认快递公司，留空=中通快递")
     auto_restock_max_qty: str | None = Field(None, description="L2 单次自动补货数量上限")
     auto_restock_max_amount: str | None = Field(None, description="L2 单次自动补货金额上限（元）")
     daily_auto_quota: str | None = Field(None, description="每日自动执行次数配额")
