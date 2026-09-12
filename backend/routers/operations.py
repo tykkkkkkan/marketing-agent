@@ -27,13 +27,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db import get_read_session, get_write_session
+from autopilot import next_run_at
 from operations import (
     ACTION_REGISTRY, AUTONOMY_LEVELS, POLICY_DEFAULTS, POLICY_LABELS,
     STATUS_APPROVED, STATUS_CANCELLED, STATUS_DONE, STATUS_FAILED,
     STATUS_PENDING, STATUS_REJECTED,
-    ActionAudit, OperationTask, action_catalog, approve_task, cancel_task,
-    create_task, create_tasks_from_scan, execute_task, get_policy, reject_task,
-    scan_candidates, set_policy, task_dict, today_auto_count, update_payload,
+    ActionAudit, OperationTask, action_catalog, approve_task, autopilot_runs,
+    cancel_task, create_task, create_tasks_from_scan, execute_task, get_policy,
+    reject_task, run_autopilot, scan_candidates, set_policy, task_dict,
+    today_auto_count, update_payload,
 )
 from zt_client import ZTAgentError, client as zt
 
@@ -55,6 +57,8 @@ class PolicyUpdate(BaseModel):
     auto_restock_max_qty: str | None = Field(None, description="L2 单次自动补货数量上限")
     auto_restock_max_amount: str | None = Field(None, description="L2 单次自动补货金额上限（元）")
     daily_auto_quota: str | None = Field(None, description="每日自动执行次数配额")
+    autopilot_enabled: str | None = Field(None, description="on/off —— 是否开启定时自动运营")
+    autopilot_interval_minutes: str | None = Field(None, description="自动运营间隔（分钟）")
     actor: str = Field("运营", max_length=50, description="操作人")
 
 
@@ -321,4 +325,38 @@ def stats(db: Session = Depends(get_write_session)):
         "global_level": policy.get("global_level"),
         "kill_switch": policy.get("kill_switch"),
         "execute_mode": policy.get("execute_mode"),
+        "autopilot_enabled": policy.get("autopilot_enabled"),
+        "autopilot_interval_minutes": policy.get("autopilot_interval_minutes"),
     }}
+
+
+# ════════════════════════════════════════════════════════════════
+# 自动运营（无人值守）
+# ════════════════════════════════════════════════════════════════
+@router.get("/auto-pilot", summary="自动运营状态")
+def autopilot_status(db: Session = Depends(get_write_session)):
+    """看自动运营是否开启、下一轮什么时候跑、最近几轮都干了什么。"""
+    policy = get_policy(db)
+    nxt = next_run_at(policy)
+    return {"success": True, "message": "ok", "data": {
+        "enabled": policy.get("autopilot_enabled") == "on",
+        "interval_minutes": policy.get("autopilot_interval_minutes"),
+        "next_run_at": nxt.strftime("%Y-%m-%d %H:%M") if nxt else "",
+        "kill_switch": policy.get("kill_switch"),
+        "runs": autopilot_runs(db, limit=10),
+    }}
+
+
+@router.post("/auto-pilot/run", summary="立即执行一轮自动运营")
+def autopilot_run_now(
+    trigger: str = Query("manual", description="manual 页面手动 / api 接口调用"),
+    read_db: Session = Depends(get_read_session),
+    write_db: Session = Depends(get_write_session),
+):
+    """手动跑一轮（不依赖定时器是否开启）——巡检 → 建单 → 按护栏执行 → 出报告。"""
+    try:
+        result = run_autopilot(write_db, read_db, trigger=trigger[:20] or "manual")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"自动运营执行失败：{type(e).__name__}")
+    return {"success": result.get("success", True), "message": result.get("message", ""),
+            "data": result}

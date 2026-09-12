@@ -137,6 +137,27 @@ class AutonomySetting(OwnBase):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class AutopilotRun(OwnBase):
+    """自动运营运行记录 —— 每次「无人值守巡检」留一条，便于复盘
+
+    自动运营 = 定时（或手动）跑一轮完整闭环：巡检 → 建单 → 按护栏执行 → 出报告。
+    它不新增任何权限：能自动执行什么，完全由自主化策略与七道护栏决定。
+    """
+    __tablename__ = "autopilot_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trigger = Column(String(20), default="timer")     # timer 定时 / manual 页面手动 / api 接口
+    status = Column(String(20), default="ok")         # ok / failed
+    message = Column(String(300), default="")
+    scanned = Column(Text, default="{}")              # 本轮扫到的候选（JSON）
+    created_count = Column(Integer, default=0)        # 新建待办数
+    auto_count = Column(Integer, default=0)           # 自动执行数
+    pending_count = Column(Integer, default=0)        # 转人工数
+    hints_count = Column(Integer, default=0)          # 售后线索数
+    started_at = Column(DateTime, default=datetime.now)
+    finished_at = Column(DateTime, nullable=True)
+
+
 # ════════════════════════════════════════════════════════════════
 # 三、动作注册表
 # ════════════════════════════════════════════════════════════════
@@ -234,6 +255,9 @@ POLICY_DEFAULTS: dict[str, str] = {
     "auto_restock_max_qty": "20",    # L2：单次自动补货数量上限
     "auto_restock_max_amount": "500",  # L2：单次自动补货金额上限（元）
     "daily_auto_quota": "10",        # 每日自动执行次数上限（所有等级生效）
+    # ── 自动运营（无人值守）──
+    "autopilot_enabled": "off",      # on / off —— 是否开启定时自动巡检
+    "autopilot_interval_minutes": "30",  # 自动巡检间隔（分钟）
 }
 
 POLICY_LABELS = {
@@ -245,6 +269,8 @@ POLICY_LABELS = {
     "auto_restock_max_qty": "单次自动补货上限(件)",
     "auto_restock_max_amount": "单次自动补货上限(元)",
     "daily_auto_quota": "每日自动执行配额(次)",
+    "autopilot_enabled": "自动运营开关",
+    "autopilot_interval_minutes": "自动巡检间隔(分钟)",
 }
 
 
@@ -852,13 +878,115 @@ def create_tasks_from_scan(write_db, read_db, actor: str = "系统巡检") -> di
 
 
 # ════════════════════════════════════════════════════════════════
-# 八、建表
+# 九、自动运营（无人值守）：定时跑一轮完整闭环并出报告
+# ════════════════════════════════════════════════════════════════
+def run_autopilot(write_db, read_db, trigger: str = "timer") -> dict:
+    """跑一轮自动运营：巡检 → 建单 → （按护栏）执行 → 出报告。
+
+    它**不新增任何权限** —— 能自动执行什么完全由自主化策略与七道护栏决定；
+    急停开启时照样巡检、照样生成待办，只是所有动作都转为人工审批。
+    每一轮都会在 `autopilot_runs` 留一条记录，便于复盘「它到底干了什么」。
+    """
+    run = AutopilotRun(trigger=trigger, started_at=datetime.now())
+    write_db.add(run)
+    write_db.commit()
+    write_db.refresh(run)
+
+    try:
+        result = create_tasks_from_scan(write_db, read_db, actor=f"自动运营({trigger})")
+    except Exception as e:  # 任何异常都不能让调度器崩掉
+        run.status = "failed"
+        run.message = f"{type(e).__name__}: {e}"[:300]
+        run.finished_at = datetime.now()
+        write_db.commit()
+        return {"success": False, "message": run.message, "run_id": run.id}
+
+    scanned = result.get("scanned", {})
+    created_ids = result.get("created_task_ids", [])
+    auto_ids = result.get("auto_executed_task_ids", [])
+    hints = result.get("hints", [])
+    policy = get_policy(write_db)
+    killed = policy.get("kill_switch") == "on"
+
+    run.scanned = json.dumps(scanned, ensure_ascii=False)
+    run.created_count = len(created_ids)
+    run.auto_count = len(auto_ids)
+    run.pending_count = len(created_ids)
+    run.hints_count = len(hints)
+    run.status = "ok"
+    run.finished_at = datetime.now()
+    if killed:
+        run.message = "急停开启：本次仅巡检并生成待办，未自动执行任何动作"
+    elif auto_ids:
+        run.message = f"自动执行 {len(auto_ids)} 条，转人工 {len(created_ids)} 条"
+    else:
+        run.message = f"本轮无需自动执行，生成待办 {len(created_ids)} 条"
+    write_db.commit()
+
+    _audit(write_db, 0, "autopilot", "autopilot_run", f"自动运营({trigger})",
+           f"扫描 {scanned}；新建 {len(created_ids)}；自动执行 {len(auto_ids)}")
+    write_db.commit()
+
+    return {
+        "success": True,
+        "run_id": run.id,
+        "trigger": trigger,
+        "message": run.message,
+        "scanned": scanned,
+        "created_task_ids": created_ids,
+        "auto_executed_task_ids": auto_ids,
+        "pending_count": run.pending_count,
+        "hints": hints,
+        "kill_switch_on": killed,
+    }
+
+
+def autopilot_runs(db, limit: int = 20) -> list[dict]:
+    """自动运营历史（最近在前）"""
+    rows = db.execute(
+        select(AutopilotRun).order_by(AutopilotRun.id.desc()).limit(limit)
+    ).scalars().all()
+    out = []
+    for r in rows:
+        try:
+            scanned = json.loads(r.scanned or "{}")
+        except (json.JSONDecodeError, TypeError):
+            scanned = {}
+        out.append({
+            "id": r.id,
+            "trigger": r.trigger,
+            "status": r.status,
+            "message": r.message,
+            "scanned": scanned,
+            "created_count": r.created_count or 0,
+            "auto_count": r.auto_count or 0,
+            "pending_count": r.pending_count or 0,
+            "hints_count": r.hints_count or 0,
+            "started_at": r.started_at.strftime("%Y-%m-%d %H:%M:%S") if r.started_at else "",
+            "finished_at": r.finished_at.strftime("%Y-%m-%d %H:%M:%S") if r.finished_at else "",
+        })
+    return out
+
+
+def last_timer_run_at(db):
+    """最近一次由定时器触发的运行时间（调度器据此判断是否到点）"""
+    row = db.execute(
+        select(AutopilotRun.started_at)
+        .where(AutopilotRun.trigger == "timer")
+        .order_by(AutopilotRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
+    return row
+
+
+# ════════════════════════════════════════════════════════════════
+# 十、建表
 # ════════════════════════════════════════════════════════════════
 def init_operation_tables() -> None:
     """创建运营执行层自管表（幂等；绝不触碰 ZT-agent 业务表）"""
     OwnBase.metadata.create_all(
         bind=write_engine,
-        tables=[OperationTask.__table__, ActionAudit.__table__, AutonomySetting.__table__],
+        tables=[OperationTask.__table__, ActionAudit.__table__,
+                AutonomySetting.__table__, AutopilotRun.__table__],
     )
     with write_engine.begin() as conn:
         for ddl in (

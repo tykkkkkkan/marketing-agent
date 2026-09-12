@@ -25,11 +25,12 @@
 <body>
 
 <h1>中渔小助 · 营销自动化 Agent<br/>运营执行层与 API 接口说明</h1>
-<p class="kicker">版本 v0.4.0 ｜ 与 ZT-agent 构成「双 Agent 系统」｜ 本文档描述「从给建议到能办事」的能力升级</p>
+<p class="kicker">版本 v0.5.0 ｜ 与 ZT-agent 构成「双 Agent 系统」｜ 本文档描述「从给建议到能办事，再到自己盯着干」的能力升级</p>
 
 <h2>一、这次升级解决了什么问题</h2>
 <p>升级前，营销 Agent 的能力边界是<strong>「看懂 + 写出」</strong>：看经营数据、写营销文案。但它发现「速攻2号已经卖断货」时，只能提示你「尽快补货」，补货这个动作仍然要你自己去收银系统里点。</p>
 <p>升级后新增<strong>运营执行层（Action Layer）</strong>，把 AI 的一句话建议变成<strong>一张可审批、可执行、可追溯的工单</strong>，覆盖四类业务动作：补库存、订单发货、退货处理、取消订单。</p>
+<p>再进一步，新增<strong>自动运营（Autopilot）</strong>：不用人喊，系统按设定间隔自己巡检、自己干活、自己留报告 —— 对应「前期问我要不要做，后期成熟了自己运营」的完整演进。</p>
 
 <table>
   <tr><th>能力</th><th>升级前</th><th>升级后</th></tr>
@@ -37,6 +38,7 @@
   <tr><td>处理待发货订单</td><td>无法感知</td><td>自动生成发货工单，补录运单号后一键发货</td></tr>
   <tr><td>售后处理</td><td>无法感知</td><td>从客户咨询里提取退换货线索，人工核实后发起退货工单</td></tr>
   <tr><td>自动化程度</td><td>无</td><td>L0~L3 四档可调：前期每条都问你，后期成熟了自动跑</td></tr>
+  <tr><td><strong>谁来触发</strong></td><td>必须人点一下</td><td><strong>可开启无人值守</strong>：定时自己巡检 → 该自动的自动执行 → 转人工的进队列 → 出报告</td></tr>
 </table>
 
 <h2>二、设计边界：为什么「能改数据」也不违规</h2>
@@ -114,15 +116,50 @@
   <tr><td>最小权限账号</td><td>建议在 ZT-agent 后台为营销 Agent <strong>单独建一个 staff 机器人账号</strong>，可随时停用，且审计日志能区分「人操作」与「Agent 操作」</td></tr>
 </table>
 
-<h2>八、API 接口清单（完整）</h2>
+<h2>八、自动运营（无人值守）：从「你喊它才动」到「它自己盯着」</h2>
+<p>第七节之前解决的都是「AI 想办事时怎么保证它不乱来」；本节解决的是<strong>「不用人喊，它自己也去办」</strong>。</p>
+<p>开启后，服务进程内会有一个轻量调度循环，按设定间隔自动跑一轮完整闭环：</p>
+<pre>定时到点 → 巡检（库存 / 订单 / 咨询）→ 按七道护栏建单
+        → 该自动的自动执行 → 转人工的进审批队列 → 留一条运行记录</pre>
+<p>人的角色随之改变：从「每天惦记着点一下巡检」变成「有空看一眼报告、处理剩下需要人拍板的那几条」。</p>
 
-<h3>8.1 系统</h3>
+<h3>8.1 开关与节奏</h3>
+<table>
+  <tr><th>策略项</th><th>默认</th><th>说明</th></tr>
+  <tr><td><code>autopilot_enabled</code></td><td><code>off</code></td><td>自动运营总开关。<strong>默认关闭</strong>，必须由人在页面上显式打开</td></tr>
+  <tr><td><code>autopilot_interval_minutes</code></td><td><code>30</code></td><td>巡检间隔，建议 30~120 分钟（数据变化没那么快，太频繁没意义）</td></tr>
+</table>
+
+<h3>8.2 三条安全设计</h3>
+<table>
+  <tr><th>设计</th><th>说明</th></tr>
+  <tr><td><strong>默认关闭</strong></td><td>不与既有行为打架。升级部署后若没人去开，系统行为与以前完全一样</td></tr>
+  <tr><td><strong>不新增任何权限</strong></td><td>自动运营只是「替人按下巡检按钮」。能自动执行什么<strong>完全由自主化策略与七道护栏决定</strong>——把开关打开 ≠ 放开一切，发货 / 退货 / 取消在任何情况下都不会被自动执行</td></tr>
+  <tr><td><strong>绝不拖垮服务</strong></td><td>循环体整体 try/except（异常只打印不抛出，循环不退出）；数据库操作走 <code>asyncio.to_thread</code> 不阻塞事件循环；每 60 秒才醒一次判断是否到点</td></tr>
+</table>
+
+<h3>8.3 运维总闸</h3>
+<p>环境变量 <code>AUTOPILOT_DISABLED=1</code>（或 <code>true</code> / <code>on</code> / <code>yes</code>）可<strong>强制不启动调度器</strong>，
+页面上的开关也随之失效。用于排障、迁移，或不希望容器后台跑定时任务的场景。</p>
+
+<h3>8.4 可观测性</h3>
+<table>
+  <tr><th>观测点</th><th>位置</th></tr>
+  <tr><td>是否开启 / 间隔 / <strong>下一轮时间</strong></td><td>前端「运营任务中心」顶部状态条</td></tr>
+  <tr><td>每一轮干了什么</td><td>前端「🤖 自动运营记录」面板（触发方式 / 巡检结果 / 新建 / 自动执行 / 转人工）</td></tr>
+  <tr><td>原始记录</td><td><code>autopilot_runs</code> 表（含本轮扫到的候选 JSON，便于复盘）</td></tr>
+  <tr><td>进程日志</td><td><code>[autopilot] 调度器就绪…</code> / <code>第 N 轮完成：…</code> / <code>本轮异常已忽略：…</code></td></tr>
+</table>
+
+<h2>九、API 接口清单（完整）</h2>
+
+<h3>9.1 系统</h3>
 <table>
   <tr><th>方法</th><th>路径</th><th>说明</th></tr>
   <tr><td>GET</td><td><code>/api/health</code></td><td>服务健康检查</td></tr>
 </table>
 
-<h3>8.2 经营分析（只读收银系统数据）</h3>
+<h3>9.2 经营分析（只读收银系统数据）</h3>
 <table>
   <tr><th>方法</th><th>路径</th><th>说明</th></tr>
   <tr><td>GET</td><td><code>/api/analytics/health-db</code></td><td>数据库连通性自检</td></tr>
@@ -133,7 +170,7 @@
   <tr><td>GET</td><td><code>/api/analytics/hot-questions</code></td><td>客户咨询热点挖掘</td></tr>
 </table>
 
-<h3>8.3 营销文案</h3>
+<h3>9.3 营销文案</h3>
 <table>
   <tr><th>方法</th><th>路径</th><th>说明</th></tr>
   <tr><td>GET</td><td><code>/api/marketing/llm-status</code></td><td>大模型配置状态</td></tr>
@@ -144,7 +181,7 @@
   <tr><td>GET</td><td><code>/api/marketing/stats</code></td><td>草稿状态统计</td></tr>
 </table>
 
-<h3>8.4 运营执行层（本轮新增）</h3>
+<h3>9.4 运营执行层</h3>
 <table>
   <tr><th>方法</th><th>路径</th><th>说明</th></tr>
   <tr><td>GET</td><td><code>/api/operations/actions</code></td><td>动作目录（能做哪些事、风险等级、参数、是否允许自动化）</td></tr>
@@ -165,9 +202,16 @@
   <tr><td>GET</td><td><code>/api/operations/audit</code></td><td>审计日志（谁、何时、做了什么）</td></tr>
   <tr><td>GET</td><td><code>/api/operations/stats</code></td><td>任务状态统计 + 今日自动执行次数</td></tr>
 </table>
+
+<h3>9.5 自动运营（无人值守，本轮新增）</h3>
+<table>
+  <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+  <tr><td>GET</td><td><code>/api/operations/auto-pilot</code></td><td>自动运营状态：是否开启、间隔、<strong>下一轮时间</strong>、最近 10 轮运行记录</td></tr>
+  <tr><td>POST</td><td><code>/api/operations/auto-pilot/run</code></td><td><strong>立即跑一轮</strong>（不等定时器，用于验证策略是否生效；可选 <code>trigger</code> 参数）</td></tr>
+</table>
 <p class="small">在线交互式文档（Swagger UI）：<code>http://127.0.0.1:8010/docs</code>；OpenAPI 规范：<code>/openapi.json</code>。</p>
 
-<h2>九、端到端验证结果（均为真实调用实测）</h2>
+<h2>十、端到端验证结果（均为真实调用实测）</h2>
 <table>
   <tr><th>用例</th><th>结果</th></tr>
   <tr><td>巡检生成待办</td><td>✅ 扫出 3 个库存预警商品 → 生成 3 条补货待办（L1 下全部转人工）</td></tr>
@@ -179,21 +223,28 @@
   <tr><td>幂等（在途去重）</td><td>✅ 同商品同数量、仅备注不同，命中同一张在途单</td></tr>
   <tr><td>幂等（重复执行）</td><td>✅ 10 分钟内重复执行被拦截，库存未再变化</td></tr>
   <tr><td>审计留痕</td><td>✅ 创建 / 批准 / 执行 / 失败 / 改策略全部入库可查</td></tr>
+  <tr><td>调度器启动</td><td>✅ 启动日志出现「调度器就绪，每 60s 检查一次」</td></tr>
+  <tr><td><strong>定时自动触发</strong></td><td>✅ 开启后无需任何人工操作，到点自动产生 <code>trigger=timer</code> 的运行记录</td></tr>
+  <tr><td><strong>无人值守真实自动执行</strong></td><td>✅ L2 + 白名单商品 + 限额内 → 自动建单并<strong>自动执行</strong>，收银系统侧真实库存 0 → 100，任务标记「🤖 系统自动执行」（随后原路回滚，净变化为零）</td></tr>
+  <tr><td>护栏不被绕过</td><td>✅ 同一轮里，白名单外的商品仍只生成待审批任务，不自动执行</td></tr>
+  <tr><td>急停对自动运营同样生效</td><td>✅ 急停开启后跑一轮：<strong>只建单、零自动执行</strong>，目标商品库存未发生任何变化</td></tr>
+  <tr><td>不留测试残留</td><td>✅ 验证后全部 6 个商品的库存 / 预留量 / 预警线与订单状态与验证前<strong>逐字段一致</strong></td></tr>
 </table>
 
-<h2>十、演进路线：从「每条都问你」到「成熟了自己干」</h2>
+<h2>十一、演进路线：从「每条都问你」到「成熟了自己干」</h2>
 <table>
   <tr><th>阶段</th><th>配置</th><th>人的角色</th></tr>
-  <tr><td>起步期</td><td>L1 人工审批 + 演练模式先跑几轮</td><td>逐条审批，建立对 AI 判断的信任</td></tr>
-  <tr><td>试点期</td><td>L2 + 目标白名单（只放开 1~2 个商品）+ 小限额</td><td>只在超限时才介入</td></tr>
-  <tr><td>成熟期</td><td>L2 放宽限额，或升到 L3</td><td>看日报、处理异常，日常不介入</td></tr>
-  <tr><td>任何时候</td><td>急停开关</td><td>一句话全部转人工</td></tr>
+  <tr><td>起步期</td><td>L1 人工审批 + 演练模式先跑几轮；<strong>自动运营保持关闭</strong></td><td>逐条审批，建立对 AI 判断的信任</td></tr>
+  <tr><td>试点期</td><td>L2 + 目标白名单（只放开 1~2 个商品）+ 小限额；<strong>自动运营开启、间隔设长一点（如 120 分钟）</strong></td><td>只在超限时才介入</td></tr>
+  <tr><td>成熟期</td><td>L2 放宽限额，或升到 L3；自动运营间隔缩短到 30 分钟</td><td>看日报、处理异常，日常不介入</td></tr>
+  <tr><td>任何时候</td><td>急停开关 / <code>AUTOPILOT_DISABLED=1</code></td><td>一句话全部转人工</td></tr>
 </table>
 <div class="ok">
-<p><strong>面试叙事建议：</strong>这套设计能同时体现三种能力 ——
+<p><strong>面试叙事建议：</strong>这套设计能同时体现四种能力 ——
 ① <strong>业务理解</strong>（知道哪些动作可自动化、哪些必须人工）；
 ② <strong>风险意识</strong>（幂等、限额、配额、急停、审计、演练模式）；
-③ <strong>架构功底</strong>（跨服务不改对方代码、通过既有接口与事务边界协作）。
+③ <strong>架构功底</strong>（跨服务不改对方代码、通过既有接口与事务边界协作）；
+④ <strong>工程闭环意识</strong>（无人值守不是「放开限制」，而是默认关闭 + 复用同一套护栏 + 全程可观测可复盘）。
 </p>
 </div>
 

@@ -17,10 +17,11 @@
 └── marketing-agent/           ← B 端营销 · FastAPI + React + LangChain · 独立 git
     ├── backend/               FastAPI 服务（:8010）
     │   ├── operations.py      运营执行层：动作注册表 + 护栏引擎 + 任务状态机 + 审计
+    │   ├── autopilot.py       自动运营调度器（无人值守，默认关闭）
     │   ├── zt_client.py       执行器：以「后台操作员」身份调用 ZT-agent 自身接口
     │   └── routers/           analytics / marketing / operations
     ├── frontend/              React 运营后台（Vite，:5173）
-    ├── docs/                  PRD + 项目技术方案（Word）
+    ├── docs/                  PRD + 项目技术方案 + 运营执行层与 API 说明（Word）
     └── docker-compose.yml     容器编排（mkt + nginx）
 ```
 
@@ -39,8 +40,9 @@
 | 前端 | React 18 + Vite 6 + Axios | 纯 CSS，品牌色 `#1F6B54` |
 | 后端 | FastAPI + SQLAlchemy 2.0 + PyMySQL | 只读引擎带写操作守卫 |
 | 大模型 | LangChain 1.x（`create_agent`）+ DeepSeek `deepseek-chat` | 与 ZT-agent 共用 API Key |
-| 数据 | 只读 ZT-agent 的 `agent_db`；自管表 `marketing_drafts` / `operation_tasks` / `action_audit_log` / `autonomy_settings` | 业务表一行不写 |
+| 数据 | 只读 ZT-agent 的 `agent_db`；自管表 `marketing_drafts` / `operation_tasks` / `action_audit_log` / `autonomy_settings` / `autopilot_runs` | 业务表一行不写 |
 | 执行 | HTTP + JWT 调用 ZT-agent 管理接口 | 标准库 `urllib`，零额外依赖 |
+| 调度 | 进程内 `asyncio` 轻量循环 | 标准库，零额外依赖，默认关闭 |
 
 ## 三、快速开始（本地开发）
 
@@ -121,6 +123,13 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | GET | `/api/operations/audit` | 审计日志（谁、何时、做了什么） |
 | GET | `/api/operations/stats` | 任务状态统计 + 今日自动执行次数 |
 
+### 自动运营（无人值守）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/operations/auto-pilot` | 自动运营状态：是否开启、间隔、**下一轮时间**、最近 10 轮记录 |
+| POST | `/api/operations/auto-pilot/run` | **立即跑一轮**（不等定时器，用于验证策略是否生效） |
+
 ## 五、运营执行层：自主化分级与护栏
 
 ### 自主化分级（对应「前期问你，后期自己干」）
@@ -166,7 +175,48 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | **全量审计** | `action_audit_log` 只追加：创建/批准/驳回/执行/失败/改策略全部留痕 |
 | **演练模式** | `dry_run` 只生成「将要发起的请求」不落地，适合演练与演示 |
 
-## 六、Agent 工具（LangChain）
+## 六、自动运营（无人值守）——「后期成熟了，自己运营就行」
+
+前面第五节解决的是「AI 想办事时，怎么保证它不乱来」；本节解决的是**「不用人喊，它自己也去办」**。
+
+开启后，服务进程内会有一个轻量调度循环，按设定间隔自动跑一轮完整闭环：
+
+```
+定时到点 → 巡检（库存/订单/咨询）→ 按七道护栏建单 → 该自动的自动执行 → 转人工的进审批队列 → 留一条运行记录
+```
+
+人要做的事，从「每天点巡检」变成「有空看一眼报告、处理剩下需要人拍板的那几条」。
+
+### 开关与节奏
+
+| 策略项 | 默认 | 说明 |
+|---|---|---|
+| `autopilot_enabled` | `off` | 自动运营总开关。**默认关闭**，必须由人在页面上显式打开 |
+| `autopilot_interval_minutes` | `30` | 巡检间隔，建议 30~120 分钟（数据变化没那么快，太频繁没意义） |
+
+### 三条安全设计
+
+1. **默认关闭** —— 不与既有行为打架。升级部署后若没人去开，系统行为和以前完全一样。
+2. **不新增任何权限** —— 自动运营只是「替人按下巡检按钮」，能自动执行什么**完全由自主化策略与七道护栏决定**。
+   把 `autopilot_enabled` 打开 ≠ 放开一切：发货/退货/取消在任何情况下都不会被自动执行。
+3. **绝不拖垮服务** —— 循环体整体 try/except（任何异常只打印不抛出，循环不会退出）；
+   数据库操作走 `asyncio.to_thread`，不阻塞事件循环；`TICK_SECONDS=60`，即每 60 秒才醒一次判断是否到点。
+
+### 运维总闸
+
+环境变量 `AUTOPILOT_DISABLED=1`（或 `true`/`on`/`yes`）可**强制不启动调度器**，
+页面上的开关也随之失效。用于排障、迁移、或不希望容器后台跑定时任务的场景。
+
+### 可观测性
+
+| 观测点 | 位置 |
+|---|---|
+| 是否开启 / 间隔 / **下一轮时间** | 前端「运营任务中心」顶部状态条 |
+| 每一轮干了什么 | 前端「🤖 自动运营记录」面板（触发方式 / 巡检结果 / 新建 / 自动执行 / 转人工） |
+| 原始记录 | `autopilot_runs` 表（含本轮扫到的候选 JSON，便于复盘） |
+| 进程日志 | `[autopilot] 调度器就绪…` / `[autopilot] 第 N 轮完成：…` / `[autopilot] 本轮异常已忽略：…` |
+
+## 七、Agent 工具（LangChain）
 
 | 工具 | 作用 |
 |---|---|
@@ -178,7 +228,7 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 **防幻觉设计**：所有数据必须由工具提供，系统提示明确禁止编造销量/价格/库存，也不允许承诺
 「百分百上鱼」这类不可验证效果。
 
-## 七、端到端验证结果（实测）
+## 八、端到端验证结果（实测）
 
 **营销侧**
 | 环节 | 结果 |
@@ -202,7 +252,21 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | 幂等（重复执行） | ✅ 10 分钟内重复执行被拦截，库存未再变化 |
 | 审计留痕 | ✅ 创建/批准/执行/失败/改策略全部入库可查 |
 
-## 八、设计约束
+**自动运营（无人值守，本轮新增，全部为真实调用实测）**
+| 用例 | 结果 |
+|---|---|
+| 调度器启动 | ✅ 启动日志出现 `[autopilot] 调度器就绪，每 60s 检查一次` |
+| **定时自动触发** | ✅ 开启后无需任何人工操作，到点自动产生 `trigger=timer` 的运行记录 |
+| 立即执行一轮 | ✅ `POST /auto-pilot/run` 返回本轮巡检结果，写入 `autopilot_runs` |
+| **无人值守真实自动执行** | ✅ L2 + 白名单商品 5 + 限额内 → 自动建单并**自动执行**，ZT 侧真实库存 `0 → 100`，任务标记「🤖 系统自动执行」（随后原路回滚，净变化为零） |
+| 护栏不被绕过 | ✅ 同一轮里，白名单外的商品仍只生成待审批任务，不自动执行 |
+| 急停对自动运营同样生效 | ✅ 急停开启后跑一轮：**只建单、零自动执行**，目标商品库存未发生任何变化 |
+| 默认关闭 | ✅ 未开启时服务行为与升级前完全一致（只在你点巡检时才工作） |
+
+> 说明：以上自动执行验证完成后已将库存**原路回滚到验证前数值**，并核对全部 6 个商品的库存、
+> 预留量、预警线与订单状态与验证前**逐字段一致**，不留测试残留。
+
+## 九、设计约束
 
 | 约束 | 说明 |
 |---|---|
@@ -212,7 +276,7 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | **不改 ZT-agent** | ZT-agent 零代码改动，可独立 `git pull && docker compose up` |
 | **人工兜底** | 文案必须审核才发布；不可逆/涉资金动作必须人工审批 |
 
-## 九、配置项
+## 十、配置项
 
 完整模板见 [`.env.example`](./.env.example)（复制为 `.env`，已被 `.gitignore` 忽略）。
 
@@ -224,11 +288,15 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 | `ZT_STAFF_USER` / `ZT_STAFF_PASSWORD` | 调用管理接口用的 staff 账号（换取 JWT） |
 | `MKT_EXECUTE_MODE` | `live` 真实执行 / `dry_run` 演练（页面上也可随时切换） |
 | `ZT_AGENT_TIMEOUT` | 调用超时秒数 |
+| `AUTOPILOT_DISABLED` | 留空=调度器正常随服务启动；`1`/`true`/`on`/`yes`=**强制不启动**（运维总闸） |
+
+> 自动运营开关（`autopilot_enabled`）与间隔（`autopilot_interval_minutes`）属于**策略项**，
+> 存在数据库 `autonomy_settings` 表里、可在页面上随时改，**不通过环境变量配置**。
 
 > **建议为营销 Agent 单独建一个机器人账号**，而不是复用超级管理员：最小权限、可随时停用，
 > 且 ZT-agent 侧的审计日志能区分「人操作」与「Agent 操作」。
 
-## 十、踩坑记录
+## 十一、踩坑记录
 
 1. **uv 在中文路径下卡死** → venv 建到无中文路径（`D:/TYKKKKKK/.venvs/marketing-agent`）。
 2. **PyPI 官方源极慢**（5 分钟无果）→ 用清华源 `--index-url https://pypi.tuna.tsinghua.edu.cn/simple`，29 秒装完。
@@ -242,3 +310,8 @@ cd frontend && npm install --registry=https://registry.npmmirror.com && npm run 
 9. **幂等键混入自由文本会失效** → 早期把 `reason` 备注算进幂等键，导致「同商品同数量、只改备注」就能绕过防重复；
    已改为只取业务标识字段（`idem_fields`）。
 10. **`.env` 里写 `K=`（空值）会绕过 `os.getenv(k, default)`** → 统一用 `os.getenv(k) or default`。
+11. **自动运营不新增权限**：`autopilot_enabled=on` 只是「让系统自己去按下巡检按钮」，
+    能自动执行什么仍完全由自主化策略 + 七道护栏决定。**不要把开关当成权限开关**。
+12. **`uv` 建的 venv 没有 pip**（`No module named pip`）→ 装依赖要用
+    `uv pip install --python <venv>/Scripts/python.exe -r requirements.txt`，并且**遵守 requirements 的版本约束**
+    （`html-to-docx` 要求 `lxml>=5.2,<6`，直接装 lxml 6.x 会出问题）。

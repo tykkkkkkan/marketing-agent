@@ -13,12 +13,13 @@ backend/
 ├── marketing_tools.py      LangChain 工具（4 个，全部只读）
 ├── marketing_agent.py      LangChain 编排（1.x create_agent + DeepSeek）
 ├── drafts.py               自管表 marketing_drafts（文案草稿）
-├── operations.py           运营执行层：动作注册表 + 护栏引擎 + 任务状态机 + 审计
+├── operations.py           运营执行层：动作注册表 + 护栏引擎 + 任务状态机 + 审计 + 自动运营
+├── autopilot.py            自动运营调度器（无人值守：进程内 asyncio 循环，默认关闭）
 ├── zt_client.py            执行器：以「后台操作员」身份调用 ZT-agent 管理接口（HTTP + JWT）
 ├── routers/
 │   ├── analytics.py        经营分析接口（销量/库存/概览/咨询热点/经营诊断）
 │   ├── marketing.py        文案生成 + 草稿审核闭环接口
-│   └── operations.py       运营任务接口（巡检/审批/执行/策略/急停/审计）
+│   └── operations.py       运营任务接口（巡检/审批/执行/策略/急停/审计/自动运营）
 ├── requirements.txt        实际锁定版本（见文件头注释）
 ├── Dockerfile
 └── .env.example
@@ -45,10 +46,17 @@ ZT-agent 没起时，只有「执行」能力不可用，看板、文案等功�
 将来万一手滑写了写操作，会在测试阶段就暴露，而不是悄悄污染 ZT-agent 的数据。
 
 写入走另一条 `write_engine`，且只被自管表使用（`marketing_drafts` / `operation_tasks` /
-`action_audit_log` / `autonomy_settings`）。
+`action_audit_log` / `autonomy_settings` / `autopilot_runs`）。
 
 配置加载顺序（`db.py` 与 `zt_client.py` 保持一致）：
 `backend/.env → marketing-agent/.env → ZT-agent/.env`，都缺失时才落到代码内置默认值。
+
+## 自动运营会占资源吗
+
+不会。`autopilot.py` 的调度循环每 **60 秒**才醒一次判断「是否到点」，到点才真的干活；
+数据库操作走 `asyncio.to_thread`，不阻塞事件循环；循环体整体 try/except，任何异常只打印不抛出。
+不引入任何新依赖（标准库 `asyncio` + 已有的同步 SQLAlchemy 会话）。
+用 `AUTOPILOT_DISABLED=1` 可彻底不启动它。
 
 ## 依赖与启动
 
@@ -62,4 +70,5 @@ curl http://127.0.0.1:8010/api/marketing/llm-status     # 大模型就绪状态
 curl http://127.0.0.1:8010/api/marketing/stats          # 草稿状态统计
 curl http://127.0.0.1:8010/api/operations/zt-status     # 收银系统连通性 + 凭据 + 执行模式
 curl http://127.0.0.1:8010/api/operations/tasks         # 运营待办列表
+curl http://127.0.0.1:8010/api/operations/auto-pilot    # 自动运营状态 + 最近运行记录
 ```

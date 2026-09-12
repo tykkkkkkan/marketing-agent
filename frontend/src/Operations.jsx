@@ -33,6 +33,7 @@ export default function Operations() {
   const [actions, setActions] = useState([])
   const [levels, setLevels] = useState([])
   const [audit, setAudit] = useState([])
+  const [auto, setAuto] = useState({ runs: [] })
   const [filter, setFilter] = useState('待审批')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -40,6 +41,7 @@ export default function Operations() {
   const [err, setErr] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showAudit, setShowAudit] = useState(false)
+  const [showAuto, setShowAuto] = useState(false)
   const [expanded, setExpanded] = useState(null)
   const [note, setNote] = useState('')
 
@@ -51,8 +53,9 @@ export default function Operations() {
       api.policy(),
       api.ztStatus(),
       api.actions(),
+      api.autoPilot(),
     ])
-      .then(([t, s, p, z, a]) => {
+      .then(([t, s, p, z, a, ap]) => {
         setTasks(t?.data?.items || [])
         setStats(s?.data || {})
         setPolicy(p?.data?.policy || {})
@@ -60,6 +63,7 @@ export default function Operations() {
         setZt(z?.data || null)
         setActions(a?.data?.actions || [])
         setLevels(a?.data?.levels || [])
+        setAuto(ap?.data || { runs: [] })
       })
       .catch((e) => setErr(e?.response?.data?.detail || e.message || '加载失败'))
       .finally(() => setLoading(false))
@@ -101,6 +105,30 @@ export default function Operations() {
 
   const savePolicy = (patch) => run('policy', () => api.updatePolicy({ ...patch, actor: '运营-汤' }))
 
+  /* 自动运营：一键开/关；开启后调度器按间隔自己巡检，人只看报告 */
+  const toggleAutoPilot = () =>
+    run('auto', async () => {
+      const on = policy.autopilot_enabled !== 'on'
+      const res = await api.updatePolicy({
+        autopilot_enabled: on ? 'on' : 'off',
+        actor: '运营-汤',
+      })
+      return {
+        message: on
+          ? `自动运营已开启：每 ${policy.autopilot_interval_minutes || 30} 分钟自动巡检一轮；发货/退货等仍会转人工审批`
+          : '自动运营已关闭，系统不再自行巡检',
+        ...res,
+      }
+    })
+
+  /* 立即跑一轮：不等定时器，马上验证策略是否生效 */
+  const runAutoNow = () =>
+    run('auto-run', async () => {
+      const res = await api.autoPilotRun('manual')
+      load()
+      return { message: res?.data?.message || res?.message || '已执行一轮' }
+    })
+
   const patchPayload = (task, key, value) =>
     run(`patch-${task.id}`, async () => {
       const res = await api.patchTask(task.id, { [key]: value })
@@ -109,6 +137,7 @@ export default function Operations() {
 
   const isLive = policy.execute_mode === 'live'
   const killed = policy.kill_switch === 'on'
+  const autoOn = policy.autopilot_enabled === 'on'
   const levelName = (levels.find((l) => l.code === policy.global_level) || {}).name || ''
 
   return (
@@ -118,6 +147,9 @@ export default function Operations() {
         <div className="filters">
           <button className="btn ghost" onClick={() => setShowAudit(!showAudit)}>
             {showAudit ? '收起操作记录' : '查看操作记录'}
+          </button>
+          <button className="btn ghost" onClick={() => setShowAuto(!showAuto)}>
+            {showAuto ? '收起自动运营记录' : '🤖 自动运营记录'}
           </button>
           <button className="btn ghost" onClick={() => setShowSettings(!showSettings)}>
             {showSettings ? '收起自主化设置' : '⚙️ 自主化设置'}
@@ -157,10 +189,22 @@ export default function Operations() {
               {stats.today_auto_count ?? 0} / {stats.daily_auto_quota ?? '-'} 次
             </span>
           </span>
+          <span className="autobar-item">
+            <b>自动运营</b>
+            <span className={autoOn ? (killed ? 'pill warn' : 'pill ok') : 'pill'}>
+              {autoOn ? (killed ? '已开启（被急停拦截）' : '运行中') : '未开启'}
+            </span>
+            {autoOn && auto.next_run_at && <span className="muted small">下一轮 {auto.next_run_at}</span>}
+          </span>
         </div>
-        <button className={killed ? 'btn ok' : 'btn danger'} onClick={toggleKill} disabled={busy === 'kill'}>
-          {killed ? '▶ 恢复自动执行' : '⏸ 急停：暂停所有自动执行'}
-        </button>
+        <div className="autobar-btns">
+          <button className={autoOn ? 'btn ghost' : 'btn primary'} onClick={toggleAutoPilot} disabled={busy === 'auto'}>
+            {busy === 'auto' ? '切换中…' : autoOn ? '⏹ 关闭自动运营' : '🤖 开启自动运营'}
+          </button>
+          <button className={killed ? 'btn ok' : 'btn danger'} onClick={toggleKill} disabled={busy === 'kill'}>
+            {killed ? '▶ 恢复自动执行' : '⏸ 急停：暂停所有自动执行'}
+          </button>
+        </div>
       </div>
       {zt && !zt.login_ok && zt.reachable && (
         <p className="muted small">
@@ -241,9 +285,31 @@ export default function Operations() {
               />
               <span className="tip">只允许对这些目标自动执行，适合先小范围试点。</span>
             </label>
+            <label>
+              自动运营
+              <select
+                value={policy.autopilot_enabled || 'off'}
+                onChange={(e) => savePolicy({ autopilot_enabled: e.target.value })}
+              >
+                <option value="off">关闭（只在你点巡检时才工作）</option>
+                <option value="on">开启（按间隔自己巡检、自己干活）</option>
+              </select>
+              <span className="tip">开启后无需人工触发；能自动做什么仍由上面几项策略决定。</span>
+            </label>
+            <label>
+              自动巡检间隔（分钟）
+              <input
+                defaultValue={policy.autopilot_interval_minutes || ''}
+                onBlur={(e) => savePolicy({ autopilot_interval_minutes: e.target.value })}
+              />
+              <span className="tip">建议 30~120 分钟；太频繁没有意义，数据变化没那么快。</span>
+            </label>
           </div>
         </div>
       )}
+
+      {/* ── 自动运营记录 ── */}
+      {showAuto && <AutoPanel auto={auto} onRunNow={runAutoNow} busy={busy} />}
 
       {/* ── 操作记录 ── */}
       {showAudit && <AuditPanel />}
@@ -438,6 +504,71 @@ function AuditPanel() {
         </tbody>
       </table>
       {rows.length === 0 && <p className="muted">暂无记录</p>}
+    </div>
+  )
+}
+
+/* ─────────────── 自动运营记录 ─────────────── */
+const TRIGGER_LABEL = { timer: '定时自动', manual: '页面手动', api: '接口触发' }
+
+function AutoPanel({ auto, onRunNow, busy }) {
+  const runs = auto?.runs || []
+  return (
+    <div className="panel">
+      <div className="row-between">
+        <h3>
+          自动运营记录
+          <span className={auto?.enabled ? 'pill ok' : 'pill'} style={{ marginLeft: 8 }}>
+            {auto?.enabled ? '运行中' : '未开启'}
+          </span>
+        </h3>
+        <button className="btn ghost" onClick={onRunNow} disabled={busy === 'auto-run'}>
+          {busy === 'auto-run' ? '执行中…' : '▶ 立即跑一轮'}
+        </button>
+      </div>
+      <p className="panel-sub">
+        这就是「后期自己运营」的效果：系统按你设定的间隔，自动巡检一次 →
+        生成待办 → 该自动的按护栏自动执行 → 剩下的等人审批。每一轮都留痕，可随时复盘它到底干了什么。
+      </p>
+      <p className="meta">
+        下一轮时间：<b>{auto?.enabled ? auto?.next_run_at || '即将执行' : '—（未开启）'}</b>
+        {auto?.enabled && ` · 间隔：每 ${auto?.interval_minutes || '-'} 分钟`}
+        {' · '}急停：
+        <b>{auto?.kill_switch === 'on' ? '已开启（只巡检不自动执行）' : '未开启'}</b>
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>触发方式</th>
+            <th>巡检结果</th>
+            <th>新建待办</th>
+            <th>自动执行</th>
+            <th>转人工</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((r) => (
+            <tr key={r.id}>
+              <td className="nowrap">{r.started_at}</td>
+              <td>{TRIGGER_LABEL[r.trigger] || r.trigger}</td>
+              <td className="muted">
+                缺货 {r.scanned?.restock_candidates ?? 0} · 待发货 {r.scanned?.ship_candidates ?? 0} ·
+                售后线索 {r.scanned?.after_sale_hints ?? 0}
+              </td>
+              <td>{r.created_count}</td>
+              <td>{r.auto_count > 0 ? <span className="pill ok">{r.auto_count}</span> : 0}</td>
+              <td>{r.pending_count}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {runs.length === 0 && (
+        <p className="muted">
+          还没有执行记录。点「▶ 立即跑一轮」试一次，就会在这里看到。
+        </p>
+      )}
     </div>
   )
 }

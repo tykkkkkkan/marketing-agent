@@ -8,6 +8,8 @@
     ZT-agent 自己的管理接口（zt_client.py），由对方保障业务规则与事务；
   · 大模型能力由 LangChain 接入（marketing_agent.py）。
 """
+import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,7 +20,7 @@ from routers import analytics, marketing, operations
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动钩子：创建自管表（幂等，只建本服务的表，不触碰业务表）"""
+    """启动钩子：创建自管表 + 启动自动运营调度器（均为幂等/可关）"""
     try:
         from drafts import init_own_tables
 
@@ -30,21 +32,42 @@ async def lifespan(app: FastAPI):
         from operations import init_operation_tables
 
         init_operation_tables()
-        print("[startup] 运营执行层自管表就绪（operation_tasks / action_audit_log / autonomy_settings）")
+        print("[startup] 运营执行层自管表就绪（operation_tasks / action_audit_log / "
+              "autonomy_settings / autopilot_runs）")
     except Exception as e:
         print(f"[warn] 运营执行层建表跳过：{type(e).__name__}: {e}")
-    yield
+
+    # 自动运营调度器：默认关闭（策略 autopilot_enabled=off），可被环境变量强制停用
+    task = None
+    if (os.getenv("AUTOPILOT_DISABLED") or "").lower() not in ("1", "true", "on", "yes"):
+        try:
+            from autopilot import scheduler_loop
+
+            task = asyncio.create_task(scheduler_loop())
+        except Exception as e:
+            print(f"[warn] 自动运营调度器未启动：{type(e).__name__}: {e}")
+
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(
     title="中渔小助 · 营销自动化 Agent",
-    version="0.4.0",
+    version="0.5.0",
     description=(
         "面向 B 端的营销自动化服务：\n\n"
         "· **只读消费** ZT-agent 的业务数据（库存/订单/咨询/知识库）；\n"
         "· 由 LangChain 编排生成营销文案，经人工审核后发布；\n"
         "· **运营执行层**：把 AI 建议变成可审批、可执行、可追溯的工单，"
-        "支持补货 / 发货 / 售后等动作的自主化分级（L0~L3）与护栏管控。"
+        "支持补货 / 发货 / 售后等动作的自主化分级（L0~L3）与护栏管控；\n"
+        "· **自动运营**：可开启定时巡检，按策略自动干活并出报告（默认关闭）。"
     ),
     lifespan=lifespan,
 )

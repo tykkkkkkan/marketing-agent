@@ -48,4 +48,8 @@ export const api = {
     unwrap(http.post(`/operations/tasks/${id}/cancel`, { actor: '运营-汤', note, execute_now: false })),
   opsStats: () => unwrap(http.get('/operations/stats')),
   opsAudit: (limit = 30) => unwrap(http.get('/operations/audit', { params: { limit } })),
+  // 自动运营（无人值守）
+  autoPilot: () => unwrap(http.get('/operations/auto-pilot')),
+  autoPilotRun: (trigger = 'manual') =>
+    unwrap(http.post('/operations/auto-pilot/run', null, { params: { trigger } })),
 }
