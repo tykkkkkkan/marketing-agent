@@ -888,8 +888,15 @@ def scan_candidates(read_db) -> dict:
         })
 
     ship: list[dict] = []
+    # 待发货建议：**排除未支付订单**。
+    # ZT 侧（任务书五·1）已加「未支付不许发货」闸门 —— 把未支付订单放进这里，
+    # 等于推荐一个必然失败的动作：运营点了也是白点，自动执行会在审计里刷一片失败。
+    # 未支付订单由 ZT 的 `cancel_unpaid_orders` 负责（超时自动取消并释放预占）。
+    # ⚠️ 空字符串是"支付功能上线前的历史订单"，视为已结算，**必须保留**在列表中。
     pending = read_db.execute(
-        select(Orders).where(Orders.status == "未发货").order_by(Orders.created_at.desc()).limit(50)
+        select(Orders).where(Orders.status == "未发货")
+        .where((Orders.payment_status.is_(None)) | (Orders.payment_status != "未支付"))
+        .order_by(Orders.created_at.desc()).limit(50)
     ).scalars().all()
     for o in pending:
         created = o.created_at.strftime("%Y-%m-%d %H:%M") if o.created_at else ""
@@ -901,6 +908,7 @@ def scan_candidates(read_db) -> dict:
             "quantity": int(o.quantity or 1),
             "total_price": round(float(o.total_price or 0), 2),
             "created_at": created,
+            "payment_status": o.payment_status or "",
             "reason": (
                 f"订单 {o.order_no}（{o.customer_name or '客户'} × {o.product_name or '商品'} "
                 f"{int(o.quantity or 1)} 件，¥{float(o.total_price or 0):.2f}）尚未发货，"

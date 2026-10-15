@@ -12,6 +12,7 @@ from decimal import Decimal
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DECIMAL,
     DateTime,
     ForeignKey,
@@ -96,6 +97,16 @@ class Orders(Base):
     status = Column(String(20))
     # ── 归属（C 端「我的订单」依据；None 表示登录体系上线前的历史订单）──
     user_id = Column(Integer)                      # 下单用户 id
+    # ── 收货与交期（ZT 0014：由客户在 C 端下单界面填写）──
+    address = Column(String(255))                  # 收货地址
+    expected_date = Column(Date)                   # 期望交期（留空 = 尽快发货）
+    # ── 支付（ZT 0015，任务书五·1）──
+    # 与 status 正交：status 说"货走到哪"，payment_status 说"钱到没到"。
+    #   空字符串 = 支付功能上线前的历史订单（视为已结算）
+    #   未支付   = 新订单默认值；ZT 侧不会给它发货，超时会被自动取消
+    #   已支付 / 已退款
+    payment_status = Column(String(10))
+    paid_at = Column(DateTime)
     # ── 物流 ──
     ship_company = Column(String(50))
     tracking_no = Column(String(50))
